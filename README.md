@@ -135,13 +135,13 @@ static/css/         style.css
 
 ## AI 工具使用
 
-**VSCode + GitHub Copilot + DeepSeek**
+**VSCode + Copilot + DeepSeek**
 
 | 工具 | 承担 |
 |---|---|
 | Copilot | inline 补全、样板代码、重复性 CSS/HTML |
 | DeepSeek | 架构讨论、复杂 bug 排查、代码审查、安全分析 |
-| 本人 | 产品决策、核心算法（`analytics.py` 手写）、边界测试、部署调试 |
+| 本人 | 产品决策、核心算法、边界测试、部署调试 |
 
 核心分析逻辑、安全策略、产品取舍均人工完成，AI 提供方向，验证由人负责。
 
