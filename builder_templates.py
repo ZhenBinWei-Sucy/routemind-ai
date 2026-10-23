@@ -6,14 +6,31 @@ TEMPLATE_2048 = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <title>2048</title>
 <style>
+  * { box-sizing: border-box; }
   body{font-family:sans-serif;background:#faf8ef;display:flex;flex-direction:column;align-items:center;padding:20px;margin:0}
   h1{color:#776e65;margin:10px 0}
   .stats{display:flex;gap:12px;margin-bottom:16px}
   .stat{background:#bbada0;color:#fff;padding:8px 16px;border-radius:6px;text-align:center}
   .stat .label{font-size:11px;opacity:0.9}
   .stat .value{font-size:20px;font-weight:bold}
-  #grid{display:grid;grid-template-columns:repeat(4,80px);gap:8px;background:#bbada0;padding:10px;border-radius:8px}
-  .cell{width:80px;height:80px;background:#cdc1b4;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:bold;color:#776e65;transition:all 0.1s}
+  #grid{
+    display:grid;
+    grid-template-columns:repeat(4,80px);
+    grid-template-rows:repeat(4,80px);
+    gap:8px;
+    background:#bbada0;
+    padding:10px;
+    border-radius:8px;
+  }
+  .cell{
+    width:80px;height:80px;background:#cdc1b4;border-radius:6px;
+    display:flex;align-items:center;justify-content:center;
+    font-size:28px;font-weight:bold;color:#776e65;
+    transition:all 0.1s;
+    overflow:hidden;            /* 防止数字溢出格子 */
+    user-select:none;           /* 滑动时不选中文字 */
+    line-height:1;
+  }
   .cell[data-v="2"]{background:#eee4da}
   .cell[data-v="4"]{background:#ede0c8}
   .cell[data-v="8"]{background:#f2b179;color:#f9f6f2}
@@ -25,6 +42,8 @@ TEMPLATE_2048 = """<!DOCTYPE html>
   .cell[data-v="512"]{background:#edc850;color:#f9f6f2;font-size:24px}
   .cell[data-v="1024"]{background:#edc53f;color:#f9f6f2;font-size:20px}
   .cell[data-v="2048"]{background:#edc22e;color:#f9f6f2;font-size:20px}
+  .cell.big{font-size:18px}     /* 4 位数（4096/8192...） */
+  .cell.huge{font-size:15px}    /* 5 位数以上 */
   button{background:#8f7a66;color:#f9f6f2;border:none;padding:10px 20px;border-radius:6px;font-size:14px;cursor:pointer;margin-top:16px}
   button:hover{background:#9f8b77}
   .hint{color:#776e65;font-size:12px;margin-top:8px}
@@ -54,7 +73,15 @@ function render(){
   const g=document.getElementById('grid');g.innerHTML='';
   for(let i=0;i<SIZE;i++)for(let j=0;j<SIZE;j++){
     const d=document.createElement('div');d.className='cell';
-    if(grid[i][j]){d.textContent=grid[i][j];d.dataset.v=grid[i][j]}
+    const v = grid[i][j];
+    if(v){
+      d.textContent=v;
+      d.dataset.v=v;
+      // ★ 按位数动态缩小字号，防止 4 位以上数字溢出
+      const len = String(v).length;
+      if (len >= 5) d.classList.add('huge');
+      else if (len === 4) d.classList.add('big');
+    }
     g.appendChild(d);
   }
   document.getElementById('score').textContent=score;
