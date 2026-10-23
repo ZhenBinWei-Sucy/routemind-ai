@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RouteMind AI — Sign In</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  :root {
+    --bg: #070b16; --bg-2: #0d1220; --card: #111827; --card-2: #162033;
+    --border: #1f2b3e; --text: #e6ebf5; --text-2: #8892a6; --text-3: #5b6578;
+    --accent: #60a5fa; --success: #34d399; --danger: #f87171;
+    --grad: linear-gradient(135deg, #60a5fa 0%, #8b5cf6 100%);
+    --mono: 'JetBrains Mono', monospace; --sans: 'Inter', -apple-system, sans-serif;
+  }
+  body {
+    font-family: var(--sans); background: var(--bg); color: var(--text);
+    font-size: 14px; line-height: 1.5; min-height: 100vh;
+    display: flex; align-items: center; justify-content: center; padding: 24px;
+    background-image:
+      radial-gradient(circle at 20% 0%, rgba(96,165,250,0.10) 0%, transparent 40%),
+      radial-gradient(circle at 80% 100%, rgba(139,92,246,0.10) 0%, transparent 40%),
+      radial-gradient(circle, rgba(255,255,255,0.02) 1px, transparent 1px);
+    background-size: auto, auto, 24px 24px;
+  }
+  .lang-switch {
+    position: fixed; top: 20px; right: 20px;
+    display: flex; gap: 4px;
+    background: var(--card); border: 1px solid var(--border);
+    padding: 4px; border-radius: 8px;
+    z-index: 100;
+  }
+  .lang-switch button {
+    padding: 5px 12px; border: none; background: transparent;
+    color: var(--text-3); font-family: inherit; font-size: 12px;
+    cursor: pointer; border-radius: 5px; transition: all 0.15s;
+  }
+  .lang-switch button.active {
+    background: var(--card-2); color: var(--text);
+  }
+  .auth-shell {
+    display: grid; grid-template-columns: 1fr 1fr;
+    width: min(1000px, 100%); min-height: 640px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 20px;
+    overflow: hidden; box-shadow: 0 30px 100px rgba(0,0,0,0.6);
+  }
+  .auth-brand {
+    background: linear-gradient(160deg, rgba(96,165,250,0.15), rgba(139,92,246,0.10));
+    padding: 56px 48px; display: flex; flex-direction: column; justify-content: center;
+    border-right: 1px solid var(--border);
+  }
+  .brand-mark {
+    width: 56px; height: 56px; border-radius: 16px; background: var(--grad);
+    display: grid; place-items: center; font-weight: 700; font-size: 28px; color: #fff;
+    box-shadow: 0 8px 32px rgba(96,165,250,0.4); margin-bottom: 32px;
+  }
+  .auth-brand h1 {
+    font-size: 32px; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 12px;
+    background: linear-gradient(135deg, #fff 0%, #8892a6 100%);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+  }
+  .auth-brand > p { color: var(--text-2); font-size: 14px; line-height: 1.6; margin-bottom: 40px; }
+  .feature-list { list-style: none; display: flex; flex-direction: column; gap: 14px; }
+  .feature-list li {
+    display: flex; align-items: center; gap: 10px; color: var(--text-2); font-size: 13px;
+  }
+  .feature-list li::before {
+    content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+    box-shadow: 0 0 8px var(--accent); flex-shrink: 0;
+  }
+  .auth-panel { padding: 56px 48px; display: flex; flex-direction: column; justify-content: center; background: var(--card); }
+  .auth-tabs {
+    display: flex; gap: 4px; margin-bottom: 28px; background: var(--bg); padding: 4px;
+    border-radius: 10px; border: 1px solid var(--border);
+  }
+  .auth-tab {
+    flex: 1; padding: 9px; border-radius: 7px; border: none; background: transparent;
+    color: var(--text-3); font-family: inherit; font-size: 13px; font-weight: 500;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .auth-tab.active { background: var(--card-2); color: var(--text); box-shadow: 0 1px 4px rgba(0,0,0,0.3); }
+  .auth-form { display: flex; flex-direction: column; gap: 4px; }
+  .auth-form.hidden { display: none; }
+  .auth-form h2 { font-size: 22px; font-weight: 600; margin-bottom: 20px; letter-spacing: -0.01em; }
+  .auth-form label {
+    font-size: 11px; color: var(--text-3); text-transform: uppercase;
+    letter-spacing: 0.05em; font-weight: 600; margin-top: 10px; margin-bottom: 2px;
+  }
+  .auth-form input {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: 11px 14px; border-radius: 8px; font-family: inherit; font-size: 13px; outline: none;
+    transition: all 0.15s;
+  }
+  .auth-form input:focus {
+    border-color: var(--accent); box-shadow: 0 0 0 3px rgba(96,165,250,0.15);
+    background: var(--card-2);
+  }
+  .pw-strength { margin-top: 8px; }
+  .pw-strength-bar {
+    height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-bottom: 6px;
+  }
+  .pw-strength-fill {
+    height: 100%; width: 0; border-radius: 2px;
+    transition: all 0.25s; background: var(--danger);
+  }
+  .pw-strength-label { font-size: 11px; color: var(--text-3); }
+  .pw-reqs { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+  .pw-req {
+    font-size: 11px; color: var(--text-3); display: flex; align-items: center; gap: 6px;
+  }
+  .pw-req::before { content: '○'; color: var(--text-3); font-weight: 700; }
+  .pw-req.met { color: var(--success); }
+  .pw-req.met::before { content: '✓'; color: var(--success); }
+  .auth-form button[type="submit"] {
+    margin-top: 20px; padding: 12px 20px; border-radius: 8px; border: none;
+    background: var(--grad); color: #fff; font-family: inherit; font-size: 13.5px;
+    font-weight: 600; cursor: pointer; box-shadow: 0 4px 20px rgba(96,165,250,0.3);
+    transition: all 0.15s;
+  }
+  .auth-form button[type="submit"]:hover { filter: brightness(1.1); }
+  .auth-form button[type="submit"]:disabled { opacity: 0.6; cursor: default; }
+  .auth-row { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; margin-bottom: 4px; }
+  .check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); cursor: pointer; }
+  .check input { width: auto; margin: 0; }
+  .link { color: var(--accent); font-size: 12px; text-decoration: none; cursor: pointer; background: none; border: none; font-family: inherit; padding: 0; }
+  .link:hover { text-decoration: underline; }
+  .auth-hint {
+    margin-top: 18px; padding: 10px 12px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 7px; font-size: 11.5px;
+    color: var(--text-3); line-height: 1.6;
+  }
+  .auth-hint code { background: var(--card-2); padding: 1px 5px; border-radius: 4px; font-family: var(--mono); font-size: 10.5px; color: var(--text-2); }
+  .auth-sub { font-size: 12.5px; color: var(--text-2); margin-bottom: 16px; line-height: 1.6; }
+  .auth-result { margin-top: 16px; padding: 12px 14px; border-radius: 8px; font-size: 12px; background: rgba(52,211,153,0.08); border: 1px solid rgba(52,211,153,0.2); color: var(--success); line-height: 1.6; word-break: break-all; }
+  .auth-result.hidden { display: none; }
+  .back-link {
+    display: inline-flex; align-items: center; gap: 4px; margin-top: 16px;
+    color: var(--text-3); font-size: 12px; text-decoration: none;
+    background: none; border: none; font-family: inherit; cursor: pointer; padding: 0;
+    align-self: flex-start;
+  }
+  .back-link:hover { color: var(--text); }
+  .toast {
+    position: fixed; bottom: 24px; left: 50%;
+    transform: translateX(-50%) translateY(100px);
+    background: var(--card-2); border: 1px solid var(--border); color: var(--text);
+    padding: 12px 20px; border-radius: 8px; font-size: 13px;
+    box-shadow: 0 12px 32px rgba(0,0,0,0.5); transition: transform 0.3s, opacity 0.3s;
+    z-index: 3000; opacity: 0; max-width: 90vw; pointer-events: none;
+  }
+  .toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+  .toast.error { border-color: var(--danger); color: var(--danger); }
+  .toast.success { border-color: var(--success); color: var(--success); }
+  @media (max-width: 860px) {
+    .auth-shell { grid-template-columns: 1fr; min-height: auto; }
+    .auth-brand { display: none; }
+    .auth-panel { padding: 40px 28px; }
+    body { padding: 12px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="lang-switch" id="lang-switch">
+  <button data-lang="en" class="active">EN</button>
+  <button data-lang="zh">中</button>
+</div>
+
+<div class="auth-shell">
+  <aside class="auth-brand">
+    <div class="brand-mark">R</div>
+    <h1>RouteMind AI</h1>
+    <p data-en="AI Logistics Intelligence Studio. Describe. Generate. Investigate. Save."
+       data-zh="AI 物流智能工作室。描述。生成。调查。保存。">AI Logistics Intelligence Studio. Describe. Generate. Investigate. Save.</p>
+    <ul class="feature-list">
+      <li data-en="200,000+ synthetic shipments (live-updating)"
+          data-zh="20 万+ 合成订单（实时更新）">200,000+ synthetic shipments (live-updating)</li>
+      <li data-en="Multi-user workspaces & settings"
+          data-zh="多用户工作区与设置">Multi-user workspaces & settings</li>
+      <li data-en="Global risk map & country ranking"
+          data-zh="全球风险地图与国家排名">Global risk map & country ranking</li>
+      <li data-en="AI assistant for logistics questions"
+          data-zh="AI 物流问答助手">AI assistant for logistics questions</li>
+    </ul>
+  </aside>
+
+  <main class="auth-panel">
+    <div class="auth-tabs" id="auth-tabs">
+      <button type="button" class="auth-tab {% if mode == 'login' %}active{% endif %}" data-mode="login"
+              data-en="Sign In" data-zh="登录">Sign In</button>
+      <button type="button" class="auth-tab {% if mode == 'register' %}active{% endif %}" data-mode="register"
+              data-en="Sign Up" data-zh="注册">Sign Up</button>
+    </div>
+
+    <form id="form-login" class="auth-form {% if mode != 'login' %}hidden{% endif %}" autocomplete="on">
+      <h2 data-en="Welcome back" data-zh="欢迎回来">Welcome back</h2>
+      <label for="login-identifier" data-en="Email or Username" data-zh="邮箱或用户名">Email or Username</label>
+      <input type="text" id="login-identifier" data-en-placeholder="you@company.com or username" data-zh-placeholder="邮箱或用户名"
+             placeholder="you@company.com or username"
+             required autocomplete="username" autofocus>
+      <label for="login-password" data-en="Password" data-zh="密码">Password</label>
+      <input type="password" id="login-password" placeholder="••••••••" required autocomplete="current-password">
+      <div class="auth-row">
+        <label class="check">
+          <input type="checkbox" id="login-remember">
+          <span data-en="Remember me" data-zh="记住我">Remember me</span>
+        </label>
+        <button type="button" class="link" id="link-forgot"
+                data-en="Forgot password?" data-zh="忘记密码？">Forgot password?</button>
+      </div>
+      <button type="submit" data-en="Sign In" data-zh="登录">Sign In</button>
+      <div class="auth-hint">
+        <span data-en="Demo admin:" data-zh="管理员账号：">Demo admin:</span>
+        <code>admin@routemind.local</code> / <code>Admin123!</code>
+      </div>
+    </form>
+
+    <form id="form-register" class="auth-form {% if mode != 'register' %}hidden{% endif %}" autocomplete="off">
+      <h2 data-en="Create your workspace" data-zh="创建你的工作区">Create your workspace</h2>
+      <label for="reg-username" data-en="Username" data-zh="用户名">Username</label>
+      <input type="text" id="reg-username" data-en-placeholder="min 4 characters" data-zh-placeholder="至少 4 个字符"
+             placeholder="min 4 characters" required minlength="4" autocomplete="username">
+      <label for="reg-email" data-en="Email" data-zh="邮箱">Email</label>
+      <input type="email" id="reg-email" data-en-placeholder="you@company.com" data-zh-placeholder="you@company.com"
+             placeholder="you@company.com" required autocomplete="email">
+      <label for="reg-password" data-en="Password" data-zh="密码">Password</label>
+      <input type="password" id="reg-password" data-en-placeholder="min 8 characters" data-zh-placeholder="至少 8 个字符"
+             placeholder="min 8 characters" required minlength="8" autocomplete="new-password">
+      <div class="pw-strength">
+        <div class="pw-strength-bar"><div class="pw-strength-fill" id="pw-fill"></div></div>
+        <div class="pw-strength-label" id="pw-label"
+             data-en="Strength: —" data-zh="强度：—">Strength: —</div>
+      </div>
+      <div class="pw-reqs">
+        <div class="pw-req" data-req="len" data-en="At least 8 characters" data-zh="至少 8 个字符">At least 8 characters</div>
+        <div class="pw-req" data-req="upper" data-en="Contains uppercase letter" data-zh="包含大写字母">Contains uppercase letter</div>
+        <div class="pw-req" data-req="digit" data-en="Contains number" data-zh="包含数字">Contains number</div>
+        <div class="pw-req" data-req="symbol" data-en="Contains symbol (!@#$…)" data-zh="包含符号（!@#$…）">Contains symbol (!@#$…)</div>
+      </div>
+      <label for="reg-confirm" data-en="Confirm Password" data-zh="确认密码">Confirm Password</label>
+      <input type="password" id="reg-confirm" data-en-placeholder="re-enter password" data-zh-placeholder="再次输入密码"
+             placeholder="re-enter password" required autocomplete="new-password">
+      <button type="submit" data-en="Create Account" data-zh="创建账号">Create Account</button>
+    </form>
+
+    <form id="form-forgot" class="auth-form hidden">
+      <h2 data-en="Reset password" data-zh="重置密码">Reset password</h2>
+      <p class="auth-sub" data-en="Enter your email. In this demo, the reset link is shown directly on the page."
+         data-zh="输入你的邮箱。演示环境下重置链接会直接显示在页面上。">Enter your email. In this demo, the reset link is shown directly on the page.</p>
+      <label for="forgot-email" data-en="Email" data-zh="邮箱">Email</label>
+      <input type="email" id="forgot-email" placeholder="you@company.com" required>
+      <button type="submit" data-en="Generate Reset Link" data-zh="生成重置链接">Generate Reset Link</button>
+      <div id="forgot-result" class="auth-result hidden"></div>
+      <button type="button" class="back-link" data-back="login"
+              data-en="← Back to sign in" data-zh="← 返回登录">← Back to sign in</button>
+    </form>
+
+    <form id="form-reset" class="auth-form {% if mode != 'reset' %}hidden{% endif %}">
+      <h2 data-en="Set a new password" data-zh="设置新密码">Set a new password</h2>
+      <input type="hidden" id="reset-token" value="{{ reset_token or '' }}">
+      <label for="reset-password" data-en="New Password" data-zh="新密码">New Password</label>
+      <input type="password" id="reset-password" data-en-placeholder="min 8 characters" data-zh-placeholder="至少 8 个字符"
+             placeholder="min 8 characters" required minlength="8" autocomplete="new-password">
+      <label for="reset-confirm" data-en="Confirm Password" data-zh="确认密码">Confirm Password</label>
+      <input type="password" id="reset-confirm" data-en-placeholder="re-enter password" data-zh-placeholder="再次输入密码"
+             placeholder="re-enter password" required autocomplete="new-password">
+      <button type="submit" data-en="Update Password" data-zh="更新密码">Update Password</button>
+      <a href="/login" class="back-link" data-en="← Back to sign in" data-zh="← 返回登录">← Back to sign in</a>
+    </form>
+  </main>
+</div>
+<div id="toast" class="toast"></div>
+<script src="/static/js/auth.js"></script>
+</body>
+</html>

@@ -1,0 +1,1119 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RouteMind AI — Logistics Intelligence Studio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<script src="https://unpkg.com/lucide@latest"></script>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<!-- Hidden honeypot fields to prevent browser autofill on search inputs -->
+<div style="position:absolute; left:-9999px; top:-9999px;" aria-hidden="true">
+  <input type="text" name="fakeuser_hp" tabindex="-1" autocomplete="username">
+  <input type="password" name="fakepass_hp" tabindex="-1" autocomplete="current-password">
+</div>
+
+<div class="app" id="app-root">
+
+  <aside class="sidebar" id="app-sidebar">
+    <div class="brand">
+      <button class="icon-btn sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar">
+        <i data-lucide="panel-left"></i>
+      </button>
+      <div class="brand-mark">R</div>
+      <div class="brand-text">
+        <div class="brand-name">RouteMind</div>
+        <div class="brand-sub" data-i18n="brand.sub">AI Logistics Studio</div>
+      </div>
+    </div>
+
+    <button class="btn btn-primary full sidebar-new" onclick="newAnalysis()">
+      <i data-lucide="plus"></i>
+      <span data-i18n="home.newAnalysis">New Analysis</span>
+    </button>
+
+    <nav class="nav">
+      <a class="nav-item active" data-view="home" title="Home">
+        <i data-lucide="home"></i><span data-i18n="nav.home">Home</span>
+      </a>
+      <a class="nav-item" data-view="dashboard" title="Data Dashboard">
+        <i data-lucide="gauge"></i><span data-i18n="nav.dashboard">Data Dashboard</span>
+      </a>
+      <a class="nav-item" data-view="database" title="Database">
+        <i data-lucide="database"></i><span data-i18n="nav.database">Database</span>
+      </a>
+      <a class="nav-item" data-view="settings" title="Settings">
+        <i data-lucide="settings"></i><span data-i18n="nav.settings">Settings</span>
+      </a>
+      {% if user and user.is_admin %}
+      <a class="nav-item" data-view="admin" title="Admin">
+        <i data-lucide="shield"></i><span data-i18n="nav.admin">Admin</span>
+      </a>
+      {% endif %}
+    </nav>
+
+    <div class="history-section" id="history-section">
+      <div class="history-head">
+        <span data-i18n="history.title">Projects</span>
+        <button class="icon-btn tiny" onclick="loadHistory()" title="Refresh">
+          <i data-lucide="refresh-cw"></i>
+        </button>
+      </div>
+      <div id="history-list" class="history-list">
+        <div class="history-empty" data-i18n="history.empty">No projects yet.</div>
+      </div>
+    </div>
+
+    <div class="sidebar-footer">
+      {% if user %}
+      <button class="btn btn-ghost full" onclick="logout()">
+        <i data-lucide="log-out"></i> <span data-i18n="nav.logout">Sign Out</span>
+      </button>
+      {% else %}
+      <div class="shared-note" data-i18n="shared.note">Shared read-only view</div>
+      {% endif %}
+    </div>
+  </aside>
+
+  <main class="main" id="main-content">
+
+    <div class="topbar">
+      <div class="topbar-status">
+        <span class="status-dot"></span>
+        <span id="freshness-label" data-i18n="topbar.fresh">Loading…</span>
+      </div>
+      <div class="topbar-spacer"></div>
+      <button class="tb-btn" id="lang-toggle" onclick="toggleLang()" title="Language">
+        <i data-lucide="languages"></i><span id="lang-label">EN</span>
+      </button>
+      <button class="tb-btn" id="theme-toggle" onclick="toggleTheme()" title="Theme">
+        <i data-lucide="moon" id="theme-icon"></i>
+      </button>
+      <button class="tb-btn" id="ai-toggle-top" onclick="toggleAIPanel()" title="AI Assistant">
+        <i data-lucide="bot"></i><span data-i18n="nav.ai">AI</span>
+      </button>
+      {% if user %}
+      <div class="user-menu-wrap" id="user-menu-wrap">
+        <button class="tb-btn user-avatar-btn" onclick="toggleUserMenu(event)" title="Account">
+          <span class="user-initial">{{ user.username[0] | upper }}</span>
+        </button>
+        <div class="user-menu hidden" id="user-menu">
+          <div class="user-menu-header">
+            <div class="um-avatar">{{ user.username[0] | upper }}</div>
+            <div class="um-meta">
+              <div class="um-name">{{ user.username }}</div>
+              <div class="um-email">{{ user.email }}</div>
+              {% if user.is_admin %}
+              <div class="um-role">ADMIN</div>
+              {% endif %}
+            </div>
+          </div>
+          <div class="user-menu-body">
+            <button class="um-item" onclick="goToSettings()">
+              <i data-lucide="user"></i> <span data-i18n="nav.settings">Settings</span>
+            </button>
+            <button class="um-item danger" onclick="logout()">
+              <i data-lucide="log-out"></i> <span data-i18n="nav.logout">Sign Out</span>
+            </button>
+          </div>
+        </div>
+      </div>
+      {% endif %}
+    </div>
+
+    <!-- ================= HOME ================= -->
+    <section id="view-home" class="view active">
+      <header class="home-hero">
+        <h1 data-i18n="home.greeting">What do you want to investigate?</h1>
+        <p data-i18n="home.sub">Describe your logistics question in natural language.</p>
+      </header>
+
+      <div class="home-input-card">
+        <textarea id="prompt-input" rows="4"
+          data-i18n-placeholder="home.placeholder"
+          placeholder="e.g. Analyze the last 30 days of delays, find carriers with highest delay rate, compare countries."></textarea>
+        <div class="home-examples">
+          <span class="examples-label" data-i18n="home.templates">Quick examples:</span>
+          <button class="chip" onclick="fillPrompt('delay')" data-i18n="tpl.delay.title">Shipment Delay</button>
+          <button class="chip" onclick="fillPrompt('carrier')" data-i18n="tpl.carrier.title">Carrier Performance</button>
+          <button class="chip" onclick="fillPrompt('country')" data-i18n="tpl.country.title">Country Risk</button>
+          <button class="chip" onclick="fillPrompt('transit')" data-i18n="tpl.transit.title">In-Transit Risk</button>
+        </div>
+        <div class="home-actions">
+          <div class="data-source"><i data-lucide="database"></i><span id="data-source-label">—</span></div>
+          <button class="btn btn-primary btn-lg" onclick="generate()">
+            <i data-lucide="zap"></i> <span data-i18n="home.generate">Generate Report</span>
+          </button>
+        </div>
+      </div>
+
+      <div id="gen-status" class="gen-status hidden">
+        <div class="gen-step"><span class="dot"></span> <span data-i18n="gen.s1">Understanding request</span></div>
+        <div class="gen-step"><span class="dot"></span> <span data-i18n="gen.s2">Selecting metrics</span></div>
+        <div class="gen-step"><span class="dot"></span> <span data-i18n="gen.s3">Preparing report</span></div>
+        <div class="gen-step"><span class="dot"></span> <span data-i18n="gen.s4">Ready to review</span></div>
+      </div>
+    </section>
+
+    <!-- ================= DATA DASHBOARD ================= -->
+    <section id="view-dashboard" class="view">
+      <header class="view-header">
+        <div>
+          <h1 data-i18n="dashboard.title">Data Dashboard</h1>
+          <p data-i18n="dashboard.sub">Overview of the current shipment dataset.</p>
+        </div>
+        <button class="btn" onclick="loadDashboard()">
+          <i data-lucide="refresh-cw"></i>
+          <span data-i18n="common.refresh">Refresh</span>
+        </button>
+      </header>
+
+      <div class="dashboard-stats" id="dash-stats">
+        <div class="stat-card">
+          <div class="stat-label" data-i18n="dashboard.total">Total Shipments</div>
+          <div class="stat-value" id="dash-total">—</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label" data-i18n="dashboard.lastUpdated">Last Updated</div>
+          <div class="stat-value small" id="dash-last-updated">—</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label" data-i18n="dashboard.quality">Data Quality</div>
+          <div class="stat-value" id="dash-quality">—</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label" data-i18n="dashboard.missing">Missing Fields</div>
+          <div class="stat-value" id="dash-missing">—</div>
+        </div>
+      </div>
+
+      <div class="chart-grid">
+        <div class="chart-card">
+          <h3 data-i18n="dashboard.statusDist">Status Distribution</h3>
+          <canvas id="dash-chart-status"></canvas>
+        </div>
+        <div class="chart-card">
+          <h3 data-i18n="dashboard.carrierDist">By Carrier</h3>
+          <canvas id="dash-chart-carrier"></canvas>
+        </div>
+      </div>
+
+      <div class="chart-grid">
+        <div class="chart-card">
+          <h3 data-i18n="dashboard.continentDist">By Continent</h3>
+          <canvas id="dash-chart-continent"></canvas>
+        </div>
+        <div class="chart-card">
+          <h3 data-i18n="dashboard.qualityDetail">Data Quality Detail</h3>
+          <div class="dq-list" id="dash-quality-detail"></div>
+        </div>
+      </div>
+
+      <div class="admin-card full" id="dash-admin-card" style="display:none;">
+        <div class="admin-card-head">
+          <h3 data-i18n="dashboard.quickActions">Admin Quick Actions</h3>
+        </div>
+        <div class="home-actions">
+          <div class="data-source">
+            <i data-lucide="shield"></i>
+            <span data-i18n="dashboard.adminOnly">Available to administrators</span>
+          </div>
+          <div style="display:flex; gap:8px;">
+            <button class="btn" onclick="switchView('admin')">
+              <i data-lucide="arrow-right"></i>
+              <span data-i18n="dashboard.goAdmin">Go to Admin Console</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= DATABASE ================= -->
+    <section id="view-database" class="view">
+      <header class="view-header">
+        <div>
+          <h1 data-i18n="database.title">Database</h1>
+          <p data-i18n="database.sub">Browse all shipments in the current dataset.</p>
+        </div>
+        <div class="ws-actions">
+          <span class="table-count" id="db-count-label">—</span>
+          <button class="btn" onclick="loadDatabase(1)">
+            <i data-lucide="refresh-cw"></i>
+            <span data-i18n="common.refresh">Refresh</span>
+          </button>
+        </div>
+      </header>
+
+      <div class="filters">
+        <div class="filter">
+          <label data-i18n="filter.carrier">Carrier</label>
+          <select id="db-carrier" onchange="applyDbFilters()">
+            <option value="" data-i18n="filter.all">All carriers</option>
+          </select>
+        </div>
+        <div class="filter">
+          <label data-i18n="filter.country">Country</label>
+          <select id="db-country" onchange="applyDbFilters()">
+            <option value="" data-i18n="filter.allCountry">All countries</option>
+          </select>
+        </div>
+        <div class="filter">
+          <label data-i18n="filter.statusLabel">Status</label>
+          <select id="db-status" onchange="applyDbFilters()">
+            <option value="" data-i18n="filter.allStatus">All statuses</option>
+            <option value="Delivered" data-i18n="filter.status.delivered">Delivered</option>
+            <option value="In Transit" data-i18n="filter.status.transit">In Transit</option>
+            <option value="Exception" data-i18n="filter.status.exception">Exception</option>
+          </select>
+        </div>
+        <div class="filter grow">
+          <label data-i18n="filter.search">Search</label>
+          <input id="db-search" class="search"
+                 type="search"
+                 name="db-q-field"
+                 autocomplete="off"
+                 autocorrect="off"
+                 autocapitalize="off"
+                 spellcheck="false"
+                 data-i18n-placeholder="database.searchPlaceholder"
+                 placeholder="Search by ID / carrier / city..."
+                 oninput="debouncedDbSearch()">
+        </div>
+      </div>
+
+      <div class="table-card">
+        <div class="table-wrap db-table-wrap">
+          <table id="db-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th data-i18n="table.carrier">Carrier</th>
+                <th data-i18n="table.country">Country</th>
+                <th data-i18n="table.city">City</th>
+                <th data-i18n="table.status">Status</th>
+                <th data-i18n="table.expected">Expected</th>
+                <th data-i18n="table.actual">Actual</th>
+                <th data-i18n="table.delay">Delay</th>
+                <th data-i18n="table.revenue">Revenue</th>
+                <th class="db-actions-col" data-i18n="database.actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="db-table-body">
+              <tr><td colspan="10" class="empty-row">—</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="pagination db-pagination">
+          <div class="pg-left">
+            <label data-i18n="database.perPage">Per page:</label>
+            <select id="db-per-page" class="mini-select" onchange="applyDbFilters()">
+              <option value="25">25</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+              <option value="200">200</option>
+            </select>
+          </div>
+          <div class="pg-right" id="db-pagination"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= REPORT ================= -->
+    <section id="view-report" class="view">
+      <header class="view-header">
+        <div>
+          <h1 id="rp-title">Report</h1>
+          <p id="rp-subtitle">—</p>
+        </div>
+        <div class="ws-actions" id="rp-actions">
+          <span id="save-status" class="save-status" data-i18n="ws.saved">Saved</span>
+          <button class="btn" onclick="showVersions()">
+            <i data-lucide="history"></i> <span data-i18n="ws.versions">Versions</span>
+          </button>
+          <button class="btn" onclick="exportCSV()">
+            <i data-lucide="download"></i> <span data-i18n="ws.exportCsv">CSV</span>
+          </button>
+          <button class="btn" onclick="printReport()">
+            <i data-lucide="printer"></i> <span data-i18n="ws.exportPdf">PDF</span>
+          </button>
+          <button class="btn" onclick="shareProject()">
+            <i data-lucide="share-2"></i> <span data-i18n="ws.share">Share</span>
+          </button>
+        </div>
+      </header>
+
+      <div class="rp-tabs" id="rp-tabs">
+        <button class="rp-tab active" data-tab="report" onclick="switchReportTab('report')">
+          <i data-lucide="file-text"></i>
+          <span data-i18n="tabs.report">Report</span>
+        </button>
+        <button class="rp-tab" data-tab="data" onclick="switchReportTab('data')">
+          <i data-lucide="table-2"></i>
+          <span data-i18n="tabs.data">Data</span>
+        </button>
+      </div>
+
+      <div id="tab-content-report">
+
+        <div class="filters">
+          <div class="filter">
+            <label data-i18n="filter.date">Date Range</label>
+            <select id="f-range" onchange="applyFilters()">
+              <option value="7" data-i18n="filter.d7">Last 7 days</option>
+              <option value="30" selected data-i18n="filter.d30">Last 30 days</option>
+              <option value="60" data-i18n="filter.d60">Last 60 days</option>
+              <option value="90" data-i18n="filter.d90">Last 90 days</option>
+              <option value="120" data-i18n="filter.d120">Last 120 days</option>
+            </select>
+          </div>
+          <div class="filter">
+            <label data-i18n="filter.carrier">Carrier</label>
+            <select id="f-carrier" onchange="applyFilters()">
+              <option value="" data-i18n="filter.all">All carriers</option>
+            </select>
+          </div>
+          <div class="filter">
+            <label data-i18n="filter.priority">Priority</label>
+            <select id="f-priority" onchange="applyFilters()">
+              <option value="" data-i18n="filter.allPriority">All priorities</option>
+            </select>
+          </div>
+          <div class="filter">
+            <label data-i18n="filter.continent">Continent</label>
+            <select id="f-continent" onchange="onContinentChange()">
+              <option value="" data-i18n="filter.allContinent">All continents</option>
+            </select>
+          </div>
+          <div class="filter">
+            <label data-i18n="filter.country">Country</label>
+            <select id="f-country" onchange="applyFilters()">
+              <option value="" data-i18n="filter.allCountry">All countries</option>
+            </select>
+          </div>
+          <div class="filter">
+            <label data-i18n="filter.minDelay">Min Delay (days)</label>
+            <select id="f-min-delay" onchange="applyFilters()">
+              <option value="" data-i18n="filter.none">No limit</option>
+              <option value="0">≥ 0</option>
+              <option value="1">≥ 1</option>
+              <option value="3" selected>≥ 3</option>
+              <option value="5">≥ 5</option>
+              <option value="7">≥ 7</option>
+              <option value="10">≥ 10</option>
+            </select>
+          </div>
+          <div class="filter">
+            <label data-i18n="filter.maxDelay">Max Delay (days)</label>
+            <select id="f-max-delay" onchange="applyFilters()">
+              <option value="" data-i18n="filter.none">No limit</option>
+              <option value="3">≤ 3</option>
+              <option value="5">≤ 5</option>
+              <option value="7">≤ 7</option>
+              <option value="10">≤ 10</option>
+              <option value="14">≤ 14</option>
+              <option value="30">≤ 30</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="range-banner" class="range-banner hidden"></div>
+
+        <section class="chapter">
+          <div class="chapter-head">
+            <div class="chapter-num">01</div>
+            <div>
+              <h2 data-i18n="ch.summary.title">Executive Summary</h2>
+              <p data-i18n="ch.summary.sub">Key metrics at a glance</p>
+            </div>
+          </div>
+
+          <div class="kpi-grid">
+            <div class="kpi-card">
+              <div class="kpi-label" data-i18n="kpi.total">Shipments</div>
+              <div class="kpi-value" id="kpi-total">—</div>
+              <div class="kpi-hint" data-i18n="kpi.totalHint">Filtered orders</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-label" data-i18n="kpi.otif">OTIF</div>
+              <div class="kpi-value ok" id="kpi-otif">—</div>
+              <div class="kpi-hint" data-i18n="kpi.otifHint">On-time + in-full / delivered</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-label" data-i18n="kpi.delay">Delay Rate</div>
+              <div class="kpi-value warn" id="kpi-delay">—</div>
+              <div class="kpi-hint" data-i18n="kpi.delayHint">Delayed / delivered</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-label" data-i18n="kpi.eta">ETA Accuracy (±1d)</div>
+              <div class="kpi-value" id="kpi-eta">—</div>
+              <div class="kpi-hint" data-i18n="kpi.etaHint">Accurate ETA / delivered</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-label" data-i18n="kpi.p90">P90 Delay</div>
+              <div class="kpi-value danger" id="kpi-p90">—</div>
+              <div class="kpi-hint" data-i18n="kpi.p90Hint">Worst 10% delay days</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-label" data-i18n="kpi.revenue">Revenue</div>
+              <div class="kpi-value" id="kpi-revenue" data-full="">—</div>
+              <div class="kpi-hint" data-i18n="kpi.revenueHint">Total shipping cost</div>
+            </div>
+          </div>
+
+          <div class="summary-line" id="summary-line">—</div>
+        </section>
+
+        <section class="chapter">
+          <div class="chapter-head">
+            <div class="chapter-num">02</div>
+            <div>
+              <h2 data-i18n="ch.trend.title">Trend &amp; Structure</h2>
+              <p data-i18n="ch.trend.sub">How is the operation moving?</p>
+            </div>
+          </div>
+          <div class="chart-grid">
+            <div class="chart-card">
+              <div class="chart-head">
+                <h3 data-i18n="chart.trend">Delay Trend</h3>
+                <div class="chart-controls">
+                  <select class="mini-select" id="trend-mode" onchange="renderCharts()">
+                    <option value="delay_rate" data-i18n="trend.mode.rate">Delay Rate</option>
+                    <option value="count" data-i18n="trend.mode.count">Delayed Count</option>
+                  </select>
+                  <button class="mini-btn active" data-i18n="chart.line" onclick="switchTrendType('line', this)">Line</button>
+                  <button class="mini-btn" data-i18n="chart.bar" onclick="switchTrendType('bar', this)">Bar</button>
+                </div>
+              </div>
+              <canvas id="chart-trend"></canvas>
+              <div class="chart-note" data-i18n="chart.trendNote">Ignores delay-range filter</div>
+            </div>
+            <div class="chart-card">
+              <h3 data-i18n="chart.status">Status Distribution</h3>
+              <canvas id="chart-status"></canvas>
+              <div class="chart-note" data-i18n="chart.statusNote">Ignores delay-range filter</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="chapter">
+          <div class="chapter-head">
+            <div class="chapter-num">03</div>
+            <div>
+              <h2 data-i18n="ch.carrier.title">Carrier &amp; Lane Performance</h2>
+              <p data-i18n="ch.carrier.sub">Who is performing and who is not</p>
+            </div>
+          </div>
+          <div class="chart-grid">
+            <div class="chart-card">
+              <div class="chart-head">
+                <h3 data-i18n="chart.carrier">Carrier Performance</h3>
+                <select class="mini-select" id="carrier-metric" onchange="renderCharts()">
+                  <option value="delay_rate" data-i18n="chart.m.delay">Delay Rate</option>
+                  <option value="otif_rate" data-i18n="chart.m.otif">OTIF</option>
+                  <option value="avg_cost_per_shipment" data-i18n="chart.m.cost">Cost/Shipment</option>
+                  <option value="total_shipments" data-i18n="chart.m.volume">Volume</option>
+                </select>
+              </div>
+              <canvas id="chart-carrier"></canvas>
+            </div>
+            <div class="chart-card">
+              <h3 data-i18n="chart.reasons">Delay Reasons</h3>
+              <canvas id="chart-reasons"></canvas>
+            </div>
+          </div>
+          <div class="table-card">
+            <div class="table-header">
+              <h3 data-i18n="table.lanes">Top Lanes (Origin → Destination)</h3>
+              <span class="table-count" id="lane-count">—</span>
+            </div>
+            <div class="table-wrap small">
+              <table id="lane-table">
+                <thead><tr>
+                  <th data-i18n="table.lane">Lane</th>
+                  <th data-i18n="table.shipments">Shipments</th>
+                  <th data-i18n="table.delayRate">Delay Rate</th>
+                  <th data-i18n="table.otifShort">OTIF</th>
+                  <th data-i18n="table.revenue">Revenue</th>
+                </tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section class="chapter">
+          <div class="chapter-head">
+            <div class="chapter-num">04</div>
+            <div>
+              <h2 data-i18n="ch.geo.title">Geographic Risk</h2>
+              <p data-i18n="ch.geo.sub">Where are the operational hotspots?</p>
+            </div>
+          </div>
+          <div class="map-card">
+            <div class="map-head">
+              <div>
+                <h3 data-i18n="chart.map">Global Risk Map</h3>
+                <span class="map-hint" id="map-hint" data-i18n="map.hintCountry">Click a country to see data</span>
+              </div>
+              <div class="map-mode-switch" id="map-mode-switch">
+                <button class="mode-btn active" data-mode="country" onclick="setMapMode('country')" title="Click country">
+                  <i data-lucide="globe"></i>
+                  <span data-i18n="map.mode.country">Country</span>
+                </button>
+                <button class="mode-btn" data-mode="city" onclick="setMapMode('city')" title="Click city point">
+                  <i data-lucide="map-pin"></i>
+                  <span data-i18n="map.mode.city">City</span>
+                </button>
+              </div>
+              <div class="map-filters">
+                <select id="m-continent" class="mini-select" onchange="onMapContinentChange()">
+                  <option value="" data-i18n="filter.allContinent">All continents</option>
+                </select>
+                <select id="m-country" class="mini-select" onchange="loadMapOnly()">
+                  <option value="" data-i18n="filter.allCountry">All countries</option>
+                </select>
+                <button class="btn tiny" onclick="resetMapView()">
+                  <i data-lucide="rotate-ccw"></i> <span data-i18n="map.reset">Reset</span>
+                </button>
+              </div>
+            </div>
+            <div id="world-map" class="world-map"></div>
+            <div id="map-detail" class="map-detail hidden"></div>
+          </div>
+
+          <div class="table-grid-2">
+            <div class="table-card">
+              <div class="table-header">
+                <h3 data-i18n="table.countryRank">Country Ranking</h3>
+                <span class="table-count" id="country-count">—</span>
+              </div>
+              <div class="table-wrap small">
+                <table id="country-table">
+                  <thead><tr>
+                    <th data-i18n="table.rank">#</th>
+                    <th data-i18n="table.country">Country</th>
+                    <th data-i18n="table.continent">Continent</th>
+                    <th data-i18n="table.shipments">Shipments</th>
+                    <th data-i18n="table.delayRate">Delay Rate</th>
+                    <th data-i18n="table.otifShort">OTIF</th>
+                  </tr></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="table-card" id="city-detail">
+              <div class="table-header">
+                <h3 id="city-table-title" data-i18n="table.cityDetail">City Breakdown</h3>
+                <span class="table-count" id="city-count" data-i18n="table.selectCountry">Select a country on the map</span>
+              </div>
+              <div class="table-wrap small">
+                <table id="city-table">
+                  <thead><tr>
+                    <th data-i18n="table.city">City</th>
+                    <th data-i18n="table.shipments">Shipments</th>
+                    <th data-i18n="table.delayRate">Delay Rate</th>
+                    <th data-i18n="table.otifShort">OTIF</th>
+                    <th data-i18n="table.revenue">Revenue</th>
+                  </tr></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="chapter">
+          <div class="chapter-head">
+            <div class="chapter-num">05</div>
+            <div>
+              <h2 data-i18n="ch.exception.title">Exceptions &amp; At-Risk</h2>
+              <p data-i18n="ch.exception.sub">What needs immediate attention?</p>
+            </div>
+          </div>
+          <div class="table-card">
+            <div class="table-header">
+              <h3><i data-lucide="alert-triangle"></i> <span data-i18n="table.atRisk">At-Risk In-Transit</span></h3>
+              <span class="table-count" id="atrisk-count">—</span>
+            </div>
+            <div class="table-wrap small">
+              <table id="atrisk-table">
+                <thead><tr>
+                  <th>ID</th>
+                  <th data-i18n="table.carrier">Carrier</th>
+                  <th data-i18n="table.country">Country</th>
+                  <th data-i18n="table.expected">Expected</th>
+                  <th data-i18n="table.daysLeft">Days Left</th>
+                  <th data-i18n="table.risk">Risk</th>
+                </tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="table-card">
+            <div class="table-header">
+              <h3 data-i18n="table.exceptions">Exception Shipments</h3>
+              <input id="search-input" class="search"
+                     type="search"
+                     name="exc-q-field"
+                     autocomplete="off"
+                     autocorrect="off"
+                     autocapitalize="off"
+                     spellcheck="false"
+                     data-i18n-placeholder="table.search"
+                     placeholder="Search ID / carrier / country..."
+                     oninput="renderExceptions()">
+            </div>
+            <div class="table-wrap">
+              <table id="exception-table">
+                <thead><tr>
+                  <th>ID</th>
+                  <th data-i18n="table.carrier">Carrier</th>
+                  <th data-i18n="table.country">Country</th>
+                  <th data-i18n="table.expected">Expected</th>
+                  <th data-i18n="table.actual">Actual</th>
+                  <th data-i18n="table.delay">Delay</th>
+                  <th data-i18n="table.reason">Reason</th>
+                </tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section class="chapter">
+          <div class="chapter-head">
+            <div class="chapter-num">06</div>
+            <div>
+              <h2 data-i18n="ch.cost.title">Cost &amp; Efficiency</h2>
+              <p data-i18n="ch.cost.sub">Where is the money going?</p>
+            </div>
+          </div>
+          <div class="chart-grid">
+            <div class="chart-card">
+              <h3 data-i18n="chart.costBreakdown">Cost Breakdown</h3>
+              <canvas id="chart-cost"></canvas>
+            </div>
+            <div class="chart-card">
+              <h3 data-i18n="chart.costVsService">Cost vs Service</h3>
+              <canvas id="chart-scatter"></canvas>
+              <div class="chart-note" data-i18n="chart.costVsServiceNote">X = cost/shipment · Y = delay rate · Bubble size = volume · Bottom-left is best</div>
+            </div>
+          </div>
+          <div class="cost-summary">
+            <div class="cost-item">
+              <div class="cost-label" data-i18n="cost.lineHaul">Line Haul</div>
+              <div class="cost-value" id="cost-line">—</div>
+            </div>
+            <div class="cost-item">
+              <div class="cost-label" data-i18n="cost.fuel">Fuel</div>
+              <div class="cost-value" id="cost-fuel">—</div>
+            </div>
+            <div class="cost-item">
+              <div class="cost-label" data-i18n="cost.accessorial">Accessorial</div>
+              <div class="cost-value" id="cost-acc">—</div>
+            </div>
+            <div class="cost-item">
+              <div class="cost-label" data-i18n="cost.detention">Detention</div>
+              <div class="cost-value" id="cost-det">—</div>
+            </div>
+            <div class="cost-item">
+              <div class="cost-label" data-i18n="cost.avgPerShipment">Avg per Shipment</div>
+              <div class="cost-value" id="cost-avg">—</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="chapter">
+          <div class="chapter-head">
+            <div class="chapter-num">07</div>
+            <div>
+              <h2 data-i18n="ch.conclusion.title">Conclusions &amp; Recommendations</h2>
+              <p data-i18n="ch.conclusion.sub">Findings, evidence, and next steps</p>
+            </div>
+          </div>
+          <div id="report-body" class="report-body" data-i18n="report.empty">Generate a report to see the conclusions.</div>
+        </section>
+
+        <section class="chapter chapter-collapsed">
+          <div class="chapter-head chapter-toggle" onclick="toggleAppendix()">
+            <div class="chapter-num">·</div>
+            <div>
+              <h2 data-i18n="ch.appendix.title">Appendix</h2>
+              <p data-i18n="ch.appendix.sub">All shipments &amp; data quality</p>
+            </div>
+            <div class="chapter-toggle-icon" id="appendix-icon"><i data-lucide="chevron-down"></i></div>
+          </div>
+
+          <div id="appendix-body" class="appendix-body hidden">
+            <div class="table-card">
+              <div class="table-header">
+                <h3 data-i18n="table.dataQuality">Data Quality</h3>
+              </div>
+              <div class="data-quality-grid" id="data-quality"></div>
+            </div>
+
+            <div class="table-card">
+              <div class="table-header">
+                <h3 data-i18n="table.all">All Shipments (latest 120)</h3>
+                <span class="table-count" id="all-count">—</span>
+              </div>
+              <div class="table-wrap">
+                <table id="all-table">
+                  <thead><tr>
+                    <th>ID</th>
+                    <th data-i18n="table.carrier">Carrier</th>
+                    <th data-i18n="table.country">Country</th>
+                    <th data-i18n="table.shipDate">Ship Date</th>
+                    <th data-i18n="table.status">Status</th>
+                    <th data-i18n="table.ontimeCol">On-time?</th>
+                    <th data-i18n="table.delay">Delay</th>
+                  </tr></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </section>
+
+      </div>
+
+      <div id="tab-content-data" class="hidden">
+        <div class="filters">
+          <div class="filter">
+            <label data-i18n="filter.date">Date Range</label>
+            <select id="d-range" onchange="applyFilters()">
+              <option value="7" data-i18n="filter.d7">Last 7 days</option>
+              <option value="30" selected data-i18n="filter.d30">Last 30 days</option>
+              <option value="60" data-i18n="filter.d60">Last 60 days</option>
+              <option value="90" data-i18n="filter.d90">Last 90 days</option>
+              <option value="120" data-i18n="filter.d120">Last 120 days</option>
+            </select>
+          </div>
+          <div class="filter">
+            <label data-i18n="filter.carrier">Carrier</label>
+            <select id="d-carrier" onchange="applyFilters()">
+              <option value="" data-i18n="filter.all">All carriers</option>
+            </select>
+          </div>
+          <div class="filter">
+            <label data-i18n="filter.priority">Priority</label>
+            <select id="d-priority" onchange="applyFilters()">
+              <option value="" data-i18n="filter.allPriority">All priorities</option>
+            </select>
+          </div>
+          <div class="filter">
+            <label data-i18n="filter.continent">Continent</label>
+            <select id="d-continent" onchange="onDataContinentChange()">
+              <option value="" data-i18n="filter.allContinent">All continents</option>
+            </select>
+          </div>
+          <div class="filter">
+            <label data-i18n="filter.country">Country</label>
+            <select id="d-country" onchange="applyFilters()">
+              <option value="" data-i18n="filter.allCountry">All countries</option>
+            </select>
+          </div>
+          <div class="filter">
+            <label data-i18n="filter.minDelay">Min Delay (days)</label>
+            <select id="d-min-delay" onchange="applyFilters()">
+              <option value="" data-i18n="filter.none">No limit</option>
+              <option value="0">≥ 0</option>
+              <option value="1">≥ 1</option>
+              <option value="3" selected>≥ 3</option>
+              <option value="5">≥ 5</option>
+              <option value="7">≥ 7</option>
+              <option value="10">≥ 10</option>
+            </select>
+          </div>
+          <div class="filter">
+            <label data-i18n="filter.maxDelay">Max Delay (days)</label>
+            <select id="d-max-delay" onchange="applyFilters()">
+              <option value="" data-i18n="filter.none">No limit</option>
+              <option value="3">≤ 3</option>
+              <option value="5">≤ 5</option>
+              <option value="7">≤ 7</option>
+              <option value="10">≤ 10</option>
+              <option value="14">≤ 14</option>
+              <option value="30">≤ 30</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="range-banner-data" class="range-banner hidden"></div>
+
+        <div class="data-summary-bar">
+          <div class="data-stat">
+            <span class="data-stat-label" data-i18n="data.total">Total</span>
+            <span class="data-stat-value" id="dstat-total">—</span>
+          </div>
+          <div class="data-stat">
+            <span class="data-stat-label" data-i18n="data.delivered">Delivered</span>
+            <span class="data-stat-value" id="dstat-delivered">—</span>
+          </div>
+          <div class="data-stat">
+            <span class="data-stat-label" data-i18n="data.delayed">Delayed</span>
+            <span class="data-stat-value" id="dstat-delayed">—</span>
+          </div>
+          <div class="data-stat">
+            <span class="data-stat-label" data-i18n="data.inTransit">In Transit</span>
+            <span class="data-stat-value" id="dstat-transit">—</span>
+          </div>
+          <div class="data-stat">
+            <span class="data-stat-label" data-i18n="data.exception">Exception</span>
+            <span class="data-stat-value" id="dstat-exception">—</span>
+          </div>
+        </div>
+
+        <div class="table-card">
+          <div class="table-header">
+            <h3 data-i18n="table.exceptions">Exception Shipments</h3>
+            <div class="table-tools">
+              <input id="d-search-exc" class="search"
+                     type="search"
+                     name="d-exc-q-field"
+                     autocomplete="off"
+                     autocorrect="off"
+                     autocapitalize="off"
+                     spellcheck="false"
+                     data-i18n-placeholder="table.search"
+                     placeholder="Search..."
+                     oninput="renderDataTables()">
+              <span class="table-count" id="d-exc-count">—</span>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table id="data-exception-table">
+              <thead><tr>
+                <th>ID</th>
+                <th data-i18n="table.carrier">Carrier</th>
+                <th data-i18n="table.country">Country</th>
+                <th data-i18n="table.city">City</th>
+                <th data-i18n="table.expected">Expected</th>
+                <th data-i18n="table.actual">Actual</th>
+                <th data-i18n="table.delay">Delay</th>
+                <th data-i18n="table.reason">Reason</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="table-card">
+          <div class="table-header">
+            <h3 data-i18n="table.all">All Shipments (latest 120)</h3>
+            <div class="table-tools">
+              <input id="d-search-all" class="search"
+                     type="search"
+                     name="d-all-q-field"
+                     autocomplete="off"
+                     autocorrect="off"
+                     autocapitalize="off"
+                     spellcheck="false"
+                     data-i18n-placeholder="table.search"
+                     placeholder="Search..."
+                     oninput="renderDataTables()">
+              <span class="table-count" id="d-all-count">—</span>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table id="data-all-table">
+              <thead><tr>
+                <th>ID</th>
+                <th data-i18n="table.carrier">Carrier</th>
+                <th data-i18n="table.country">Country</th>
+                <th data-i18n="table.city">City</th>
+                <th data-i18n="table.priority">Priority</th>
+                <th data-i18n="table.shipDate">Ship Date</th>
+                <th data-i18n="table.status">Status</th>
+                <th data-i18n="table.ontimeCol">On-time?</th>
+                <th data-i18n="table.delay">Delay</th>
+                <th data-i18n="table.revenue">Revenue</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div id="loading-overlay" class="loading-overlay hidden">
+        <div class="loader-wrap">
+          <div class="loader-truck" id="loader-truck">
+            <div class="container-box">
+              <div class="container-corners"></div>
+              <div class="container-ridge"></div>
+            </div>
+            <div class="truck-cab">
+              <div class="cab-window"></div>
+              <div class="cab-headlight"></div>
+            </div>
+            <div class="truck-wheel wheel-rear"><span class="spoke"></span></div>
+            <div class="truck-wheel wheel-front"><span class="spoke"></span></div>
+          </div>
+          <div class="loader-road">
+            <div class="road-surface"></div>
+            <div class="road-fill" id="loader-road-fill"></div>
+          </div>
+        </div>
+        <div class="loader-info">
+          <div class="loader-text" id="loader-stage-text" data-i18n="loading.prepare">Preparing request</div>
+          <div class="loader-pct" id="loader-pct">0%</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= SETTINGS ================= -->
+    <section id="view-settings" class="view">
+      <header class="view-header">
+        <div>
+          <h1 data-i18n="settings.title">Settings</h1>
+          <p data-i18n="settings.sub">Manage your account and preferences.</p>
+        </div>
+      </header>
+      <div class="settings-grid">
+        <div class="settings-card">
+          <h3 data-i18n="settings.profile">Profile</h3>
+          <div class="settings-row">
+            <span class="settings-label" data-i18n="settings.username">Username</span>
+            <span class="settings-value" id="set-username">—</span>
+          </div>
+          <div class="settings-row">
+            <span class="settings-label" data-i18n="settings.email">Email</span>
+            <span class="settings-value" id="set-email">—</span>
+          </div>
+          <div class="settings-row">
+            <span class="settings-label" data-i18n="settings.role">Role</span>
+            <span class="settings-value" id="set-role">—</span>
+          </div>
+        </div>
+        <div class="settings-card">
+          <h3 data-i18n="settings.changePw">Change Password</h3>
+          <label data-i18n="settings.currentPw">Current password</label>
+          <input type="password" id="set-old-pw" autocomplete="current-password">
+          <label data-i18n="settings.newPw">New password</label>
+          <input type="password" id="set-new-pw" autocomplete="new-password">
+          <div class="pw-strength">
+            <div class="pw-strength-bar"><div class="pw-strength-fill" id="set-pw-fill"></div></div>
+            <div class="pw-strength-label" id="set-pw-label">Strength: —</div>
+          </div>
+          <label data-i18n="settings.confirmPw">Confirm new password</label>
+          <input type="password" id="set-confirm-pw" autocomplete="new-password">
+          <button class="btn btn-primary full" onclick="changePassword()" style="margin-top:16px;">
+            <i data-lucide="key"></i> <span data-i18n="settings.updatePw">Update Password</span>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= ADMIN ================= -->
+    {% if user and user.is_admin %}
+    <section id="view-admin" class="view">
+      <header class="view-header">
+        <div><h1 data-i18n="admin.title">Admin Console</h1><p data-i18n="admin.sub">Manage users, dataset, and audit trail.</p></div>
+        <button class="btn" onclick="loadAdmin()"><i data-lucide="refresh-cw"></i> <span data-i18n="common.refresh">Refresh</span></button>
+      </header>
+      <div class="admin-stats" id="admin-stats"></div>
+      <div class="admin-grid">
+        <div class="admin-card">
+          <div class="admin-card-head"><h3 data-i18n="admin.users">Users</h3></div>
+          <div class="table-wrap">
+            <table id="admin-users-table">
+              <thead><tr>
+                <th>ID</th>
+                <th data-i18n="admin.colUser">Username</th>
+                <th data-i18n="admin.colEmail">Email</th>
+                <th data-i18n="admin.colRole">Role</th>
+                <th data-i18n="admin.colStatus">Status</th>
+                <th data-i18n="admin.colActions">Actions</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="pagination" id="admin-user-pagination"></div>
+        </div>
+        <div class="admin-card">
+          <div class="admin-card-head"><h3 data-i18n="admin.dataset">Dataset</h3></div>
+          <p class="admin-help" data-i18n="admin.datasetHelp">Upload a CSV to replace the current shipment dataset.</p>
+          <input type="file" id="csv-file" accept=".csv" class="file-input">
+          <button class="btn btn-primary" onclick="uploadCSV()">
+            <i data-lucide="upload"></i> <span data-i18n="admin.upload">Upload &amp; Replace</span>
+          </button>
+          <button class="btn" onclick="simulateTick()" style="margin-top:8px;">
+            <i data-lucide="plus-circle"></i> <span data-i18n="admin.simulate">Simulate +500 rows</span>
+          </button>
+          <div id="csv-result" class="admin-result hidden"></div>
+        </div>
+      </div>
+      <div class="admin-card full">
+        <div class="admin-card-head">
+          <h3 data-i18n="admin.audit">Audit Log</h3>
+          <span class="table-count" data-i18n="admin.auditHint">Last 100 events</span>
+        </div>
+        <div class="table-wrap">
+          <table id="audit-table">
+            <thead><tr>
+              <th data-i18n="admin.colTime">Time</th>
+              <th data-i18n="admin.colUserShort">User</th>
+              <th data-i18n="admin.colAction">Action</th>
+              <th data-i18n="admin.colDetail">Detail</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+    {% endif %}
+
+  </main>
+
+  <aside id="ai-panel" class="ai-panel hidden">
+    <div class="ai-header">
+      <div class="ai-title">
+        <i data-lucide="bot"></i>
+        <span data-i18n="chat.title">AI Assistant</span>
+      </div>
+      <button class="icon-btn" onclick="toggleAIPanel()"><i data-lucide="x"></i></button>
+    </div>
+    <div class="ai-subtitle" data-i18n="chat.hint">Ask anything about the current data</div>
+    <div id="chat-log" class="chat-log"></div>
+    <div id="chat-options" class="chat-options"></div>
+    <div class="chat-input-row">
+      <input id="chat-input" class="chat-input"
+             data-i18n-placeholder="chat.placeholder"
+             placeholder="e.g. Which carrier is worst?"
+             onkeydown="if(event.key==='Enter') sendAssistant()">
+      <button class="btn btn-primary" onclick="sendAssistant()">
+        <i data-lucide="send"></i>
+      </button>
+    </div>
+  </aside>
+
+</div>
+
+<!-- Edit modal -->
+<div id="db-edit-modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h3 data-i18n="database.editTitle">Edit Shipment</h3>
+      <button class="icon-btn" onclick="closeEditModal()"><i data-lucide="x"></i></button>
+    </div>
+    <div class="modal-body" id="db-edit-body"></div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeEditModal()" data-i18n="database.cancel">Cancel</button>
+      <button class="btn btn-primary" onclick="saveEditShipment()" data-i18n="database.saveChanges">Save Changes</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+<script id="app-state" type="application/json">{{ app_state_json | safe }}</script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>
