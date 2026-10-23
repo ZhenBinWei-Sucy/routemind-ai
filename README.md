@@ -1,175 +1,206 @@
-# RouteMind AI · 精简版 README
-
-直接覆盖 `README.md` 即可。
-
-```markdown
 # RouteMind AI
 
-AI 物流分析工作室：自然语言 → 可交互报告。Flask + 原生 JS + SQLite。
+> 候选人 **甄彬炜** · Atoms Demo 答卷
+
+用一句话描述你的物流问题 → Agent 解析意图 → 生成可交互、可分享的分析工作台。
+
+**在线体验**：https://routemind-ai-bdwr.onrender.com
+**测试账号**：`admin@routemind.local` / `Admin123!`
 
 ---
 
-## 功能
+## 我理解的 Atoms
 
-- **自然语言分析**：一句话生成报告（延误、承运商、国家、在途风险、成本）
-- **六大模块**：KPI 摘要、趋势、承运商/线路、地理风险、异常/在途、成本
-- **全球地图**：国家按延误率着色；国家模式 / 地区模式切换；点击查看详情
-- **工作流**：自动保存、版本历史、只读分享、CSV/PDF 导出
-- **数据管理**：数据库浏览、管理员编辑、CSV 上传替换、增量模拟
-- **平台**：多用户、角色权限、审计日志、中英双语、暗/亮主题、AI 问答
+Atoms 的本质不是"用 AI 生成代码"，而是 **Agent 驱动 + 端到端交付**：用户给出意图，Agent 负责从理解、决策到产出可运行结果的完整链路。
+
+RouteMind 选择物流分析作为场景，把"代码生成"具体化为"**分析应用生成**"——Agent 的产物不是一段静态文本报告，而是一个具备 6 大分析模块、可交互地图、可分享链接、可持久化项目的工作台。
 
 ---
 
-## 快速开始
+## 演示路径（3 分钟）
 
-### Windows
+1. **登录** → 用测试账号进入
+2. **首页输入**：`分析最近 30 天的延误，找出最差的承运商`
+3. **点击生成** → 观察 4 步进度条（理解需求 → 选择指标 → 准备报告 → 就绪）
+4. **查看报告** → 6 个 KPI、6 张图表、地图、明细表
+5. **切换过滤器** → 时间范围 / 承运商 / 洲 → 实时重算并自动保存
+6. **点击地图上的国家** → 右侧面板显示该国指标，城市明细表更新
+7. **切换「地区」模式** → 城市青点出现 → 点击城市 → 高亮其所属国家
+8. **右上角 AI** → 问「哪个承运商最差？」→ 有结构化回答
+9. **Share** → 生成只读链接 → 无痕窗口打开验证
+10. **左侧历史** → 刷新页面后项目仍在
 
-```powershell
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+---
 
-$env:SECRET_KEY = python -c "import secrets;print(secrets.token_urlsafe(48))"
-$env:DEMO_MODE = "0"
-python app.py
-```
+## 功能清单
 
-> Windows 不支持 gunicorn。生产用：`pip install waitress` + `python wsgi.py`
+### Agent 核心
+- **自然语言解析**：识别时间范围、承运商、国家、洲、延误阈值、图表类型
+- **上下文追问**：AI 助手支持「那国家呢？」「它的 OTIF 如何？」等指代追问
+- **结构化配置输出**：Agent 产出 `filters + config`，驱动后续全部计算
 
-### macOS / Linux
+### 分析应用（Agent 的产物）
+- **6 大模块**：执行摘要、趋势与结构、承运商与线路、地理风险、异常与在途、成本与效率
+- **核心 KPI**：订单量、OTIF、延误率、ETA 准确率、P90 延误、营收
+- **关联分析**：承运商 × 延误原因矩阵、成本 vs 服务散点图、延误区间分布
+
+### 可视化
+- **全球风险地图**（ECharts）
+  - 国家模式：所有有数据的国家按延误率着色，点击查看详情
+  - 地区模式：城市散点 + 选中城市时高亮所属国家
+  - 支持缩放、平移、中英双语
+- **Chart.js 图表**：延误趋势、状态分布、承运商对比、成本拆解、成本-服务散点
+
+### 工作流
+- 项目自动保存 + 版本历史（最近 50 版，可回滚）
+- 只读分享链接（128 位熵）
+- CSV 导出（防注入）+ PDF 打印
+
+### 数据管理（管理员）
+- 数据库浏览（分页、搜索、多维过滤）
+- 订单编辑（状态、日期、成本等）
+- CSV 上传替换数据集（带字段校验、50 万行 / 100 MB 上限）
+- 模拟增量数据（+1000 条/次）
+- 审计日志
+
+### 平台能力
+- 多用户注册登录、密码重置
+- 管理员 / 普通用户角色
+- 中英双语实时切换
+- 暗色 / 亮色主题
+- 登录限流、XSS / CSV 注入防护
+
+---
+
+## 技术栈
+
+| 层 | 选型 | 原因 |
+|---|---|---|
+| 后端 | Flask 3 | 轻量、可读，单文件入口方便评审 |
+| 数据库 | SQLite（WAL） | 单机零依赖，5 万条数据 < 100ms 查询 |
+| 前端 | 原生 JS | 无构建工具，源码直接可读 |
+| 图表 | Chart.js + ECharts | 一个负责趋势，一个负责地图 |
+| 认证 | Session Cookie | HttpOnly + SameSite=Lax + 生产 Secure |
+
+**部署**：Render（Gunicorn + Persistent Disk）
+
+---
+
+## 本地运行
 
 ```bash
-python3 -m venv venv && source venv/bin/activate
+# 1. 虚拟环境
+python -m venv venv
+source venv/bin/activate        # Windows: .\venv\Scripts\Activate.ps1
+
+# 2. 依赖
 pip install -r requirements.txt
 
+# 3. 环境变量
 export SECRET_KEY="$(python -c 'import secrets;print(secrets.token_urlsafe(48))')"
 export DEMO_MODE=0
+# Windows PowerShell:
+#   $env:SECRET_KEY = python -c "import secrets;print(secrets.token_urlsafe(48))"
+#   $env:DEMO_MODE = "0"
+
+# 4. 启动
 python app.py
 ```
 
-打开 <http://127.0.0.1:5000/login>
+打开 <http://127.0.0.1:5000/login>。
 
-**默认管理员**：`admin@routemind.local` / `Admin123!`（**部署后立即修改**）
-
----
-
-## 环境变量
-
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `SECRET_KEY` | — | **生产必填** |
-| `DEMO_MODE` | `0` | `1` 时忘记密码重置链接只打到日志 |
-| `DB_PATH` | `routemind.db` | SQLite 路径 |
-| `DATA_SIZE` | `50000` | 首次生成的合成订单数 |
-| `ENABLE_TICK` | `1` | 是否定时新增数据 |
-| `FLASK_DEBUG` | `0` | 调试模式 |
-| `PORT` | `5000` | 端口 |
+首次启动会生成 5 万条合成订单（约 3–8 秒），之后启动 < 1 秒。
 
 ---
 
 ## 项目结构
 
 ```
-app.py              Flask 主应用
-analytics.py        指标计算
-data_generator.py   合成数据
-request_parser.py   自然语言 → 配置
+app.py              Flask 主应用：路由、认证、缓存、数据管理
+analytics.py        指标计算、过滤、聚合、延误分析
+data_generator.py   合成数据（国家 / 城市 / 承运商 / 延误原因）
+request_parser.py   自然语言 → 分析配置
 chat_modifier.py    AI 助手意图
-templates/          index.html / auth.html
-static/js/          app.js / auth.js
+templates/          index.html（SPA）/ auth.html
+static/js/          app.js（SPA 控制器）/ auth.js
 static/css/         style.css
 ```
 
 ---
 
-## 主要 API
+## 实现思路与关键取舍
 
-| 路径 | 说明 | 权限 |
+### Agent 的边界
+
+**做了什么**：Agent 解析自然语言 → 输出 `{filters, config}` → 触发计算管线 → 前端渲染 6 个分析模块。同一个意图配置可以产出完全不同的报告视图。
+
+**为什么不让 LLM 直接生成代码**：48 小时内 LLM 生成代码的稳定性不可控，且不利于展示"可扩展性"——把 Agent 的输出限定为结构化配置，反而让每个下游模块都有清晰的扩展点。
+
+**继续投入时的升级路径**：把固定计算管线替换为 Agent 自主选择 SQL / 组合图表，即可从"领域分析 Agent"升级为"通用 BI Agent"。
+
+### 数据策略
+
+- **完全合成**：48 小时内不依赖任何外部 API，稳定性可控
+- **5 万条基础数据 + 后台增量**：既能展示大数据量下的性能，又能演示实时更新
+- **报告结果缓存 30 秒**：filters 哈希作为 key，容量 64 槽 LRU
+
+### 复杂度控制
+
+- 前端不上框架 → 面试官能直接读 `app.js` 里 Agent 意图处理逻辑
+- 后端不拆微服务 → 单文件 `app.py` 加三个模块，5 分钟能读懂全貌
+- 地图用 ECharts 而非 Mapbox → 免 token、免额度、开箱即用
+
+---
+
+## 完成度
+
+### ✅ 已完成
+- 注册 / 登录 / 修改密码 / 重置密码
+- 自然语言 → 报告生成（4 步进度反馈）
+- 6 大分析模块 + 12+ 可视化
+- 全球地图（国家 / 地区双模式，点击钻取）
+- AI 助手（8 类意图 + 上下文追问）
+- 项目自动保存 + 版本历史 + 只读分享
+- CSV 导出 / PDF 打印
+- 数据管理（编辑订单 / 上传 CSV / 模拟增量）
+- 中英双语 + 暗亮主题
+- 审计日志 + 登录限流 + CSV 注入防护
+
+### ⏳ 未做（及原因）
+- **LLM 生成 SQL 而非固定管线**：需要 API 额度 + 安全沙箱，超出 4 小时范围
+- **多租户隔离**：当前所有用户共享同一份合成数据，真实场景需要
+- **移动端深度适配**：仅做了响应式基础
+
+---
+
+## 如果继续投入（优先级）
+
+| 优先级 | 能力 | 预估 |
 |---|---|---|
-| `POST /api/auth/login` | 登录（限流 10 次/分） | 公开 |
-| `POST /api/analyze` | 自然语言 → 配置 | 登录 |
-| `POST /api/report` | 计算报告（30s 缓存） | 登录 |
-| `POST /api/map/focus` | 单国家/城市详情 | 登录 |
-| `PUT /api/db/shipments/<id>` | 修改订单 | 管理员 |
-| `POST /api/admin/upload-csv` | 上传替换数据集 | 管理员 |
-| `GET /api/share/<token>` | 只读分享内容 | 公开 |
+| **P0** | 接入真实 LLM，把固定管线升级为 Agent 自主选 SQL | 8h |
+| P1 | 用自然语言修改图表（"换成柱状图""只看亚洲"） | 4h |
+| P2 | 移动端手势支持（地图缩放、表格滑动） | 3h |
+| P3 | 分享链接过期 + 只读/可编辑权限 | 2h |
 
 ---
 
-## CSV 上传要求
+## AI 工具使用说明
 
-必填列：`shipment_id, ship_date, carrier, origin, destination, destination_country, status, shipping_cost`
+全程 Cursor（Claude Sonnet 4.5 / GPT-5）：
 
-- 日期：`YYYY-MM-DD`
-- `status`：`Delivered` / `In Transit` / `Exception`
-- 上限：50 万行 / 100 MB，UTF-8 编码
-
----
-
-## 安全措施
-
-- 密码：PBKDF2-SHA256；≥8 字符 + 大写 + 数字
-- Session：HttpOnly + SameSite=Lax + 生产 Secure
-- 登录限流、用户名白名单（防 XSS）、参数化 SQL
-- CSV 注入防护、上传大小/行数限制
-- 最后一个活跃管理员不可撤销/禁用
-- 分享链接 128 位熵、审计日志
-
-**生产清单**：`SECRET_KEY` + `DEMO_MODE=0` + HTTPS + Gunicorn/Waitress + 修改默认密码
+- **AI 主导**：Flask 骨架、数据生成器、ECharts 地图 bug 排查
+- **人工主导**：`analytics.py` 核心分析逻辑逐行手写，边界条件测试手工覆盖；所有安全审查（XSS / CSV 注入 / 限流）逐条验证
 
 ---
 
-## 常见问题
+## 已知限制
 
-**Windows `export` 报错？** → PowerShell 用 `$env:VAR = "value"`
-
-**`No module named 'fcntl'`？** → gunicorn 仅 Linux；Windows 用 `python wsgi.py`（需 `pip install waitress`）
-
-**首次启动慢？** → 生成 5 万条数据约 3–8 秒；之后 <1 秒。减少量：`$env:DATA_SIZE = "10000"`（需先删 `routemind.db`）
-
-**端口占用？** → `$env:PORT = "5001"`（需 `app.py` 末尾读取 `PORT`）
-
-**地图不显示？** → 需能访问 `cdn.jsdelivr.net` 加载 `world.json`
-
-**忘记管理员密码？**
-
-```powershell
-python -c "import sqlite3;from werkzeug.security import generate_password_hash;c=sqlite3.connect('routemind.db');c.execute('UPDATE users SET password_hash=? WHERE username=?',(generate_password_hash('NewPass123!'),'admin'));c.commit();c.close()"
-```
-
-**清空数据重来？** → 停止服务，删 `routemind.db`，重启
+- 地图色阶用 **P90 × 1.3** 动态计算，极端数据下对比度会被压缩
+- Render 免费层冷启动约 40 秒
+- 分享链接目前不限期，吊销需手动删 `shares` 表对应行
 
 ---
 
-## 可选文件
+## 许可证
 
-**`wsgi.py`**（Windows 生产入口）
-
-```python
-from app import app
-if __name__ == "__main__":
-    from waitress import serve
-    serve(app, host="0.0.0.0", port=5000, threads=4)
-```
-
-**`run.ps1`**（Windows 一键启动）
-
-```powershell
-$env:DEMO_MODE = "0"
-$env:SECRET_KEY = python -c "import secrets;print(secrets.token_urlsafe(48))"
-$env:FLASK_DEBUG = "1"
-python app.py
-```
-
-**`app.py` 末尾**（支持 PORT 变量）
-
-```python
-if __name__ == "__main__":
-    ensure_initialized()
-    app.run(
-        debug=os.environ.get("FLASK_DEBUG") == "1",
-        port=int(os.environ.get("PORT", "5000")),
-        threaded=True,
-        use_reloader=False,
-    )
-```
+教学 / 演示用途。商用请自行评估合规、安全与 SLA 要求。
