@@ -386,6 +386,17 @@ def init_db():
     conn.close()
     load_all_to_cache()
 
+def ensure_initialized():
+    global _init_done
+    if _init_done:
+        return
+    with _init_lock:
+        if _init_done:
+            return
+        init_db()
+        if ENABLE_TICK:
+            start_tick()
+        _init_done = True
 
 class User(UserMixin):
     def __init__(self, row):
@@ -1538,6 +1549,10 @@ def admin_audit():
 
 
 if __name__ == "__main__":
-    init_db()
-    start_tick()
-    app.run(debug=True, port=5000, threaded=True, use_reloader=False)
+    ensure_initialized()
+    app.run(
+        debug=os.environ.get("FLASK_DEBUG") == "1",
+        port=int(os.environ.get("PORT", "5000")),
+        threaded=True,
+        use_reloader=False,
+    )
