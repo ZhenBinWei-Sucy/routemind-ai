@@ -33,6 +33,13 @@ from chat_modifier import apply_chat_modification
 
 app = Flask(__name__)
 
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger("routemind")
+
 # ── SECRET_KEY ────────────────────────────────────────────────
 _secret = os.environ.get("SECRET_KEY")
 if not _secret:
@@ -124,9 +131,15 @@ def _pw_ok(p):
     return len(p) >= 8 and bool(re.search(r"[A-Z]", p)) and bool(re.search(r"\d", p))
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    db_dir = os.path.dirname(os.path.abspath(DB_PATH))
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError:
+        pass
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
@@ -257,7 +270,7 @@ def _tick_worker():
             batch = generate_incremental_batch(TICK_SIZE)
             append_shipments(batch)
             _last_tick_at[0] = utc_now().isoformat()
-            print(f"[tick] +{len(batch)} rows, total≈{len(_shipments_cache)}")
+            logger.info(f"[tick] +{len(batch)} rows, total≈{len(_shipments_cache)}")
         except Exception as e:
             print("[tick] failed:", e)
 
@@ -267,6 +280,7 @@ def start_tick():
 
 
 def init_db():
+    logger.info(f"[init_db] starting, DB_PATH={DB_PATH}")
     conn = get_conn()
     c = conn.cursor()
     existing = c.execute(
@@ -368,12 +382,12 @@ def init_db():
 
     count = c.execute("SELECT COUNT(*) FROM shipments").fetchone()[0]
     if count == 0:
-        print(f"Seeding {DATA_SIZE:,} synthetic shipments...")
+        logger.info(f"Seeding {DATA_SIZE:,} synthetic shipments...")
         for batch in generate_shipments_batches(DATA_SIZE):
             placeholders = ",".join(["?"] * len(SHIPMENT_COLS))
             c.executemany(f"INSERT INTO shipments VALUES ({placeholders})", batch)
             conn.commit()
-        print("Seed complete.")
+        logger.info("Seed complete.")
 
     admin = c.execute("SELECT id FROM users WHERE username='admin'").fetchone()
     if not admin:
@@ -1548,8 +1562,16 @@ def admin_audit():
     return jsonify([dict(r) for r in rows])
 
 
-if __name__ == "__main__":
+# ── 模块级初始化：Gunicorn worker 每次 import app 时执行 ──
+logger.info("[startup] running ensure_initialized...")
+try:
     ensure_initialized()
+    logger.info("[startup] ensure_initialized OK")
+except Exception as e:
+    logger.exception(f"[startup] ensure_initialized FAILED: {e}")
+
+
+if __name__ == "__main__":
     app.run(
         debug=os.environ.get("FLASK_DEBUG") == "1",
         port=int(os.environ.get("PORT", "5000")),
