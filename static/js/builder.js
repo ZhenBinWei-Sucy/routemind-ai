@@ -221,7 +221,10 @@
     renderWelcomeIfEmpty();
     if (currentProjectId) {
       renderVersions();
-      restoreChatHistory();
+      const log = $("chat-log");
+      if (log && !log.querySelector(".chat-msg")) {
+        restoreChatHistory();
+      }
     }
     loadProjects();
     renderGenButtonIdle();
@@ -409,7 +412,9 @@
     $("version-list").innerHTML = "";
 
     $("chat-log").innerHTML = welcomeHTML();
-    $("project-title").textContent = t("builder.untitled");
+    const titleEl = $("project-title");
+    titleEl.setAttribute("data-i18n", "builder.untitled");   // ★ 恢复
+    titleEl.textContent = t("builder.untitled");
     $("instruction").value = "";
     $("instruction").focus();
 
@@ -421,11 +426,15 @@
     currentProjectId = pid;
     $("project-title").textContent = title;
 
+    // ★ 清空上一个项目残留的对话
+    const log = $("chat-log");
+    if (log) log.innerHTML = "";
+
     await loadVersions();
 
     if (versions.length) {
-      restoreChatHistory();
       await restoreVersion(versions[0].id, true);
+      restoreChatHistory();
     } else {
       $("chat-log").innerHTML = `
         <div class="chat-welcome">
@@ -539,7 +548,7 @@
   function restoreChatHistory() {
     const log = $("chat-log");
     if (!log || !versions.length) return;
-    if (log.querySelector(".chat-msg")) return; // 避免重复
+    // ★ 删掉：if (log.querySelector(".chat-msg")) return;
 
     const sorted = [...versions].sort((a, b) => {
       const ta = new Date(a.created_at).getTime() || 0;
@@ -550,6 +559,8 @@
     log.innerHTML = "";
     sorted.forEach((v, i) => {
       const isLatest = i === sorted.length - 1;
+      const versionNo = sorted.length - i;
+
       const userMsg = document.createElement("div");
       userMsg.className = "chat-msg user";
       userMsg.textContent = v.instruction || t("builder.versionInitial");
@@ -558,8 +569,8 @@
       const aiMsg = document.createElement("div");
       aiMsg.className = "chat-msg assistant";
       aiMsg.textContent = isLatest
-        ? `${t("builder.versionCurrent")}`
-        : `v${sorted.length - i}`;
+        ? `v${versionNo} · ${t("builder.versionCurrent")}`
+        : `v${versionNo}`;
       log.appendChild(aiMsg);
     });
 
