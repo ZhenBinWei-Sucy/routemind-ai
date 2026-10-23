@@ -1207,3 +1207,15 @@ tbody tr:hover { background: rgba(96,165,250,0.04); }
   .home-hero h1 { font-size: 24px; }
   .data-summary-bar { grid-template-columns: 1fr 1fr; }
 }
+
+/* App Builder hero */
+.builder-hero {
+  display: flex; align-items: center; justify-content: space-between; gap: 20px;
+  padding: 20px 24px; margin-bottom: 24px;
+  background: linear-gradient(135deg, rgba(96,165,250,0.12), rgba(139,92,246,0.08));
+  border: 1px solid rgba(96,165,250,0.3); border-radius: var(--radius);
+  flex-wrap: wrap;
+}
+.builder-hero-text h2 { font-size: 17px; font-weight: 600; margin-bottom: 4px; }
+.builder-hero-text p { font-size: 13px; color: var(--text-2); }
+.builder-hero .btn { white-space: nowrap; }

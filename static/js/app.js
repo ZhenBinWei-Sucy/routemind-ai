@@ -1492,7 +1492,6 @@ function populateFilterSelects() {
 
     if (countryEl) populateCountriesForPrefix(prefix);
     if (rangeEl && !rangeEl.value) rangeEl.value = "30";
-    if (minDelayEl && minDelayEl.value === "") minDelayEl.value = "3";
   });
 
   const mContEl = $("m-continent");
@@ -1602,6 +1601,8 @@ function syncFilters() {
 }
 
 const debouncedCompute = debounce(() => compute(), 300);
+const debouncedRenderDataTables = debounce(() => renderDataTables(), 300);
+const debouncedRenderExceptions = debounce(() => renderExceptions(), 300);
 
 function applyFilters() {
   if (state.readonly) { toastT("toast.readonly", "", "error"); return; }
@@ -1609,7 +1610,7 @@ function applyFilters() {
   const otherPrefix = state.activeReportTab === "data" ? "f" : "d";
   syncFiltersToUI(otherPrefix);
   markUnsaved();
-  compute();
+  debouncedCompute();      // ★ 改为防抖，快速切换下拉不会连点触发多次请求
 }
 
 // =============================================================
@@ -1688,8 +1689,8 @@ async function compute() {
     autoSaveProject();
   } catch (e) {
     console.error("[compute] failed:", e);
-    state.lastData = null;
     if (seq === state.computeSeq) {
+      // ★ 不再清空 lastData，保留上一次成功结果，只提示错误
       toastT("toast.computeFailed", " " + (e.message || ""), "error");
       hideLoading();
     }
@@ -3216,29 +3217,68 @@ function matchIntent(text) {
   if (/(优化|改善|improve|optimize|suggest|建议|recommend|怎么)/.test(s)) return "optimize";
   return null;
 }
-function handleQuestion(textOrKey, isKey) {
+async function handleQuestion(textOrKey, isKey) {
   if (!state.lastData) { addChat("assistant", t("chat.noData")); return; }
+
+  // 快捷按钮：走本地规则，零延迟
   if (isKey) {
     addChat("user", t("qa.opt." + textOrKey));
     state._lastIntent = textOrKey;
     answerIntent(textOrKey, state.lastData);
     return;
   }
+
+  // 自由文本：调 LLM
   addChat("user", textOrKey);
-  let intent = matchIntent(textOrKey);
-  if (!intent && state._lastIntent) {
-    if (/(那|它|呢|这个|那个|that|it|what about|how about|same)/i.test(textOrKey)) {
-      intent = state._lastIntent;
+
+  const loadingEl = document.createElement("div");
+  loadingEl.className = "chat-msg assistant";
+  loadingEl.innerHTML = '<span style="opacity:0.6;">思考中…</span>';
+  $("chat-log").appendChild(loadingEl);
+  $("chat-log").scrollTop = $("chat-log").scrollHeight;
+
+  const fallback = () => {
+    const intent = matchIntent(textOrKey) || state._lastIntent;
+    if (intent) {
+      state._lastIntent = intent;
+      answerIntent(intent, state.lastData);
+    } else {
+      addChat("assistant", t("chat.fallback"));
+      renderChatOptions(defaultOptions());
     }
-  }
-  if (intent) {
-    state._lastIntent = intent;
-    answerIntent(intent, state.lastData);
-  } else {
-    addChat("assistant", t("chat.fallback"));
-    renderChatOptions(defaultOptions());
+  };
+
+  try {
+    const d = state.lastData;
+    const res = await api("/api/assistant", {
+      method: "POST",
+      body: JSON.stringify({
+        question: textOrKey,
+        report: {
+          metrics: d.metrics,
+          carriers: (d.carriers || []).slice(0, 5),
+          countries: (d.countries || []).slice(0, 5),
+          delay_reasons: (d.delay_reasons || []).slice(0, 5),
+          cost_breakdown: d.cost_breakdown,
+          range_stats: d.range_stats,
+        },
+      }),
+    });
+
+    loadingEl.remove();
+
+    if (res.answer) {
+      addChat("assistant", res.answer);
+      renderChatOptions(defaultOptions());
+    } else {
+      fallback();
+    }
+  } catch (e) {
+    loadingEl.remove();
+    fallback();
   }
 }
+
 function answerIntent(intent, data) {
   const m = data.metrics;
   const carriers = data.carriers || [];
@@ -4134,8 +4174,8 @@ window.addEventListener("DOMContentLoaded", async () => {
   updateMapHint();
 
   $("set-new-pw")?.addEventListener("input", updateSettingsStrength);
-  $("d-search-exc")?.addEventListener("input", renderDataTables);
-  $("d-search-all")?.addEventListener("input", renderDataTables);
+  $("d-search-exc")?.addEventListener("input", debouncedRenderDataTables);
+  $("d-search-all")?.addEventListener("input", debouncedRenderDataTables);
   $("trend-mode")?.addEventListener("change", () => {
     state.trendMode = $("trend-mode").value;
     renderCharts();

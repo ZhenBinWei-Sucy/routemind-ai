@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ title or "分享的应用" }} — RouteMind</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: sans-serif; height: 100vh; display: flex; flex-direction: column; background: #0d1220; }
+  .bar { padding: 12px 20px; background: #111827; color: #e6ebf5; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1f2b3e; }
+  .bar a { color: #60a5fa; text-decoration: none; font-size: 14px; }
+  iframe { flex: 1; border: none; width: 100%; }
+</style>
+</head>
+<body>
+  <div class="bar">
+    <span>{{ title or "分享的应用" }}</span>
+    <a href="/builder">我也要做一个 →</a>
+  </div>
+  <iframe sandbox="allow-scripts allow-forms allow-modals" srcdoc="{{ code }}"></iframe>
+</body>
+</html>

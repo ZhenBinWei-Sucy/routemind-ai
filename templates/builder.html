@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>App Builder — RouteMind</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/builder.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+</head>
+<body>
+
+<div class="builder-app">
+
+  <!-- 左栏：项目 + 新建 -->
+  <aside class="builder-sidebar">
+    <div class="builder-brand">
+      <div class="builder-brand-top">
+        <a href="/" class="back-link" data-i18n="builder.back">← 返回 RouteMind</a>
+        <div class="builder-lang-switch" id="lang-switch">
+          <button type="button" data-lang="en">EN</button>
+          <button type="button" data-lang="zh" class="active">中</button>
+        </div>
+      </div>
+      <h1 data-i18n="builder.title">App Builder</h1>
+      <p class="builder-sub" data-i18n="builder.subtitle">描述一句话，生成可运行的应用</p>
+    </div>
+
+    <button class="btn-new" onclick="newProject()" data-i18n="builder.newApp">+ 新建应用</button>
+
+    <div class="model-status" id="model-status">
+      <span class="dot"></span>
+      <span id="model-label" data-i18n="builder.modelNotConfigured">未配置 API Key</span>
+      <button class="btn-link" onclick="openSettings()" data-i18n="builder.configure">配置</button>
+    </div>
+
+    <div id="project-list" class="project-list"></div>
+  </aside>
+
+  <!-- 中栏：对话 + 生成 -->
+  <section class="builder-chat">
+    <div class="chat-header">
+      <span id="project-title" data-i18n="builder.untitled">未命名应用</span>
+      <div class="chat-actions">
+        <button class="btn-small" onclick="openSettings()" data-i18n="builder.settingsBtn">⚙ 设置</button>
+        <button class="btn-small" onclick="saveShare()" data-i18n="builder.shareBtn">分享</button>
+      </div>
+    </div>
+
+    <div id="chat-log" class="chat-log"></div>
+
+    <div class="chat-input-row">
+      <textarea id="instruction"
+                data-i18n-placeholder="builder.instructionPlaceholder"
+                placeholder="描述你的需求… Enter 发送，Shift+Enter 换行"
+                rows="3"></textarea>
+      <button onclick="generate()" id="gen-btn" class="gen-btn">
+        <span id="gen-btn-text" data-i18n="builder.generateBtn">生成</span>
+      </button>
+    </div>
+  </section>
+
+  <!-- 右栏：预览 / 代码 / 版本 -->
+  <section class="builder-preview">
+    <div class="preview-tabs">
+      <button class="tab active" data-tab="preview" onclick="switchTab('preview')" data-i18n="builder.tabPreview">预览</button>
+      <button class="tab" data-tab="code" onclick="switchTab('code')" data-i18n="builder.tabCode">代码</button>
+      <button class="tab" data-tab="versions" onclick="switchTab('versions')" data-i18n="builder.tabVersions">版本历史</button>
+
+      <div class="preview-actions">
+        <button class="btn-small" onclick="reloadPreview()" data-i18n="builder.reload" title="Reload">↻ 刷新</button>
+        <button class="btn-small" onclick="copyCode()" data-i18n="builder.copy">复制</button>
+        <button class="btn-small" onclick="downloadCode()" data-i18n="builder.download">下载</button>
+      </div>
+    </div>
+
+    <div id="tab-preview" class="tab-panel">
+      <div id="preview-loading" class="preview-loading hidden" data-i18n="builder.loading">加载中…</div>
+      <iframe id="app-frame" sandbox="allow-scripts allow-forms allow-modals"></iframe>
+    </div>
+
+    <div id="tab-code" class="tab-panel hidden">
+      <pre id="code-view"><code class="language-html"></code></pre>
+    </div>
+
+    <div id="tab-versions" class="tab-panel hidden">
+      <div id="version-list"></div>
+    </div>
+  </section>
+</div>
+
+<!-- API 设置弹窗 -->
+<div id="settings-modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h3 data-i18n="builder.settingsTitle">配置模型服务</h3>
+      <button class="icon-btn" onclick="closeSettings()">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="modal-hint" data-i18n="builder.settingsHint">使用你自己的 API Key，配置会同步到你的账号。</p>
+
+      <label data-i18n="builder.provider">平台</label>
+      <div class="provider-grid" id="provider-grid"></div>
+
+      <label data-i18n="builder.apiKey">API Key</label>
+      <div class="pw-input">
+        <input id="s-api-key" type="password" placeholder="sk-..." autocomplete="off">
+        <button type="button" onclick="toggleKeyVis()">👁</button>
+      </div>
+
+      <label data-i18n="builder.baseUrl">接口地址</label>
+      <input id="s-base-url" placeholder="https://api.openai.com/v1">
+
+      <label data-i18n="builder.model">模型</label>
+      <input id="s-model" placeholder="gpt-4o-mini" list="model-options">
+      <datalist id="model-options"></datalist>
+
+      <div class="modal-errors" id="s-error"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="clearSettings()" data-i18n="builder.clearSettings">清除配置</button>
+      <div class="foot-right">
+        <button class="btn" onclick="testConnection()" id="test-btn" data-i18n="builder.testConnection">测试连接</button>
+        <button class="btn btn-primary" onclick="saveSettings()" id="save-btn" data-i18n="builder.saveSettings">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="/static/js/builder.js"></script>
+</body>
+</html>

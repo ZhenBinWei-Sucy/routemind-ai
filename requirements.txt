@@ -1,5 +1,8 @@
 flask==3.0.3
 flask-login==0.6.3
 werkzeug==3.0.3
-apscheduler==3.10.4
 gunicorn==21.2.0
+requests==2.32.3
+
+# Windows 生产入口（wsgi.py 用），Linux/Render 不装
+waitress==3.0.0; sys_platform == "win32"

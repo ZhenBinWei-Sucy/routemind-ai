@@ -3,17 +3,18 @@ import hashlib
 import io
 import json
 import os
-import re                       # ← 必须保留
+import re
 import secrets
 import sqlite3
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 from flask import (Flask, render_template, request, jsonify, redirect,
-                   url_for, Response)
+                   url_for, Response, make_response)
 from flask_login import (LoginManager, UserMixin, login_user, logout_user,
                          login_required, current_user)
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -29,7 +30,6 @@ from analytics import (
     is_delayed,
 )
 from request_parser import parse_request, parse_followup, SUPPORTED_HINT
-from chat_modifier import apply_chat_modification
 
 app = Flask(__name__)
 
@@ -48,8 +48,8 @@ if not _secret:
     _secret = "routemind-demo-secret-change-me"
 
 app.config["SECRET_KEY"] = _secret
-app.config["DEMO_MODE"] = os.environ.get("DEMO_MODE", "0") == "1"   # 默认关闭
-app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024                  # 100MB
+app.config["DEMO_MODE"] = os.environ.get("DEMO_MODE", "0") == "1"
+app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
 app.config.update(
     SESSION_COOKIE_SECURE=(os.environ.get("FLASK_ENV") == "production"
                            or bool(os.environ.get("RENDER"))),
@@ -75,7 +75,8 @@ _last_tick_at = [None]
 _filter_cache = {"data": None, "dirty": True}
 _filter_cache_lock = threading.Lock()
 
-_report_cache = {}
+# ★ LRU report cache
+_report_cache = OrderedDict()
 _report_cache_lock = threading.Lock()
 REPORT_CACHE_TTL = 30
 REPORT_CACHE_MAX = 64
@@ -129,6 +130,7 @@ def _rate_limit(key, limit=10, window=60):
 # ── 密码策略 ─────────────────────────────────────────────────
 def _pw_ok(p):
     return len(p) >= 8 and bool(re.search(r"[A-Z]", p)) and bool(re.search(r"\d", p))
+
 
 def get_conn():
     db_dir = os.path.dirname(os.path.abspath(DB_PATH))
@@ -184,7 +186,6 @@ def append_shipments(rows):
         conn.commit()
     finally:
         conn.close()
-    # data_generator 现在用 uuid 前缀 → ID 不会冲突，可安全全部 append
     with _shipments_lock:
         _shipments_cache.extend(_row_tuple_to_dict(r) for r in rows)
     invalidate_filter_cache()
@@ -192,8 +193,9 @@ def append_shipments(rows):
 
 
 def get_cached():
+    # ★ 返回副本，防止并发迭代时 list 大小变化
     with _shipments_lock:
-        return _shipments_cache
+        return list(_shipments_cache)
 
 
 def invalidate_filter_cache():
@@ -203,8 +205,29 @@ def invalidate_filter_cache():
 
 def invalidate_report_cache():
     with _report_cache_lock:
-        _report_cache["key"] = None
-        _report_cache["data"] = None
+        _report_cache.clear()
+
+
+# ── Report LRU cache ─────────────────────────────────────────
+def _report_cache_get(key):
+    with _report_cache_lock:
+        entry = _report_cache.get(key)
+        if not entry:
+            return None
+        ts, data = entry
+        if time.time() - ts > REPORT_CACHE_TTL:
+            _report_cache.pop(key, None)
+            return None
+        _report_cache.move_to_end(key)
+        return data
+
+
+def _report_cache_put(key, data):
+    with _report_cache_lock:
+        _report_cache[key] = (time.time(), data)
+        _report_cache.move_to_end(key)
+        while len(_report_cache) > REPORT_CACHE_MAX:
+            _report_cache.popitem(last=False)
 
 
 def get_filter_options_data():
@@ -247,7 +270,6 @@ def get_filter_options_data():
 
 
 def _get_all_cities_with_flag(filtered_ships):
-    """全量城市 + in_filter 标记"""
     opts = get_filter_options_data()
     all_cities = opts.get("all_cities", [])
     filtered_keys = set(
@@ -272,7 +294,7 @@ def _tick_worker():
             _last_tick_at[0] = utc_now().isoformat()
             logger.info(f"[tick] +{len(batch)} rows, total≈{len(_shipments_cache)}")
         except Exception as e:
-            print("[tick] failed:", e)
+            logger.exception("[tick] failed")
 
 
 def start_tick():
@@ -289,7 +311,7 @@ def init_db():
     if existing:
         cols = [row[1] for row in c.execute("PRAGMA table_info(shipments)").fetchall()]
         if "order_quantity" not in cols or "destination_lon" not in cols:
-            print("Rebuilding shipments table (schema upgrade)...")
+            logger.info("Rebuilding shipments table (schema upgrade)...")
             c.execute("DROP TABLE IF EXISTS shipments")
             conn.commit()
 
@@ -343,7 +365,7 @@ def init_db():
             user_id INTEGER, action TEXT NOT NULL, detail TEXT, created_at TEXT NOT NULL
         )
     """)
-    c.execute(f"""
+    c.execute("""
         CREATE TABLE IF NOT EXISTS shipments (
             shipment_id TEXT PRIMARY KEY,
             ship_date TEXT,
@@ -400,6 +422,7 @@ def init_db():
     conn.close()
     load_all_to_cache()
 
+
 def ensure_initialized():
     global _init_done
     if _init_done:
@@ -411,6 +434,7 @@ def ensure_initialized():
         if ENABLE_TICK:
             start_tick()
         _init_done = True
+
 
 class User(UserMixin):
     def __init__(self, row):
@@ -469,8 +493,24 @@ def _app_state(user, token=""):
             "id": user.id, "username": user.username,
             "email": user.email, "is_admin": bool(user.is_admin),
         }
-    # 把 </ 转义，防止提前闭合 <script> 标签
     return json.dumps(payload).replace("</", "<\\/")
+
+
+# ── CORS for /api/public/* (iframe sandbox → origin=null 需要它) ──
+@app.after_request
+def _add_public_cors(resp):
+    if request.path.startswith("/api/public/"):
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        resp.headers["Access-Control-Max-Age"] = "86400"
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+    return resp
+
+
+@app.route("/api/public/<path:_>", methods=["OPTIONS"])
+def _public_preflight(_):
+    return ("", 204)
 
 
 @app.route("/")
@@ -514,6 +554,10 @@ def shared_view(token):
 
 @app.route("/api/auth/register", methods=["POST"])
 def register():
+    ip = request.remote_addr or "unknown"
+    if not _rate_limit(f"register:{ip}", limit=5, window=300):
+        return jsonify({"error": "Too many attempts. Try again later."}), 429
+
     d = request.get_json() or {}
     u = (d.get("username") or "").strip()
     e = (d.get("email") or "").strip().lower()
@@ -586,27 +630,34 @@ def logout():
 
 @app.route("/api/auth/forgot", methods=["POST"])
 def forgot_password():
+    t0 = time.time()
     ip = request.remote_addr or "unknown"
     if not _rate_limit(f"forgot:{ip}", limit=5, window=300):
         return jsonify({"error": "Too many attempts. Try again later."}), 429
     d = request.get_json() or {}
     e = (d.get("email") or "").strip().lower()
+
+    token = None
     conn = get_conn()
     row = conn.execute("SELECT * FROM users WHERE email=?", (e,)).fetchone()
-    if not row:
-        conn.close()
-        return jsonify({"ok": True, "message": "If this email exists, reset link generated."})
-    token = secrets.token_urlsafe(32)
-    expiry = (utc_now() + timedelta(hours=1)).isoformat()
-    conn.execute("UPDATE users SET reset_token=?, reset_token_expiry=? WHERE id=?",
-                 (token, expiry, row["id"]))
-    conn.commit()
+    if row:
+        token = secrets.token_urlsafe(32)
+        expiry = (utc_now() + timedelta(hours=1)).isoformat()
+        conn.execute("UPDATE users SET reset_token=?, reset_token_expiry=? WHERE id=?",
+                     (token, expiry, row["id"]))
+        conn.commit()
     conn.close()
-    url = f"{request.host_url.rstrip('/')}/reset/{token}"
-    payload = {"ok": True, "message": "Reset link generated."}
-    if app.config["DEMO_MODE"]:
-        # 只在服务端日志打印，不返回给 client
-        print(f"[DEMO] reset link for {e}: {url}")
+
+    payload = {"ok": True, "message": "If this email exists, reset link generated."}
+    if token and app.config["DEMO_MODE"]:
+        url = f"{request.host_url.rstrip('/')}/reset/{token}"
+        logger.info(f"[DEMO] reset link for {e}: {url}")
+
+    # ★ 恒定时间，防邮箱枚举
+    elapsed = time.time() - t0
+    if elapsed < 0.25:
+        time.sleep(0.25 - elapsed)
+
     return jsonify(payload)
 
 
@@ -766,6 +817,41 @@ def create_share(pid):
     return jsonify({"token": token, "url": f"/share/{token}"})
 
 
+@app.route("/api/projects/<pid>/versions", methods=["GET"])
+@login_required
+def list_project_versions(pid):
+    r = _owned_project(pid)
+    if not r:
+        return jsonify({"error": "not found"}), 404
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT version_id, created_at FROM project_versions "
+        "WHERE project_id=? ORDER BY created_at DESC", (pid,)).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/projects/<pid>/versions/<vid>/restore", methods=["POST"])
+@login_required
+def restore_project_version(pid, vid):
+    r = _owned_project(pid)
+    if not r:
+        return jsonify({"error": "not found"}), 404
+    conn = get_conn()
+    v = conn.execute(
+        "SELECT * FROM project_versions WHERE version_id=? AND project_id=?",
+        (vid, pid)).fetchone()
+    if not v:
+        conn.close()
+        return jsonify({"error": "version not found"}), 404
+    conn.close()
+    return jsonify({
+        "ok": True,
+        "config": json.loads(v["config"] or "{}"),
+        "filters": json.loads(v["filters"] or "{}"),
+    })
+
+
 @app.route("/api/share/<token>", methods=["GET"])
 def get_shared(token):
     conn = get_conn()
@@ -859,6 +945,10 @@ def _insights_struct(m, carriers, countries, reasons, range_stats, lanes):
 
 def _compute_report(filters):
     ships = get_cached()
+
+    # 注意：
+    # - main_f：用于 metrics / 图表 / exceptions（受延误区间约束，但 In Transit / Exception 保留）
+    # - base_f：用于状态饼图 / 趋势 / 地图（不受延误区间约束）
     main_f = apply_filters(ships, filters)
     base_filters = {k: v for k, v in filters.items()
                     if k not in ("min_delay_days", "max_delay_days")}
@@ -868,7 +958,7 @@ def _compute_report(filters):
     status_dist = get_status_distribution(base_f)
     trend = get_delay_trend(base_f, int(filters.get("date_range_days") or 30))
     carriers = group_by(main_f, "carrier")
-    countries = get_country_stats(base_f)  # 供图表/表格
+    countries = get_country_stats(base_f)
     continents = get_continent_stats(base_f)
     reasons = get_delay_reasons(main_f)
     lanes = get_lane_stats(base_f)
@@ -878,8 +968,7 @@ def _compute_report(filters):
         base_f, filters.get("min_delay_days"), filters.get("max_delay_days"))
     data_quality = get_data_quality(main_f)
 
-    # 供地图使用的数据（合并到 report 里，避免二次请求 /api/map）
-    map_countries = countries  # 已按 delay_rate 排序
+    map_countries = countries
     map_cities = _get_all_cities_with_flag(base_f)
 
     threshold = filters.get("min_delay_days")
@@ -930,21 +1019,13 @@ def report():
     d = request.get_json() or {}
     filters = d.get("filters", {})
     key = _filters_cache_key(filters)
-    now = time.time()
 
-    with _report_cache_lock:
-        if (_report_cache["key"] == key
-                and _report_cache["data"] is not None
-                and now - _report_cache["ts"] < REPORT_CACHE_TTL):
-            return jsonify(_report_cache["data"])
+    cached = _report_cache_get(key)
+    if cached is not None:
+        return jsonify(cached)
 
     data = _compute_report(filters)
-
-    with _report_cache_lock:
-        _report_cache["key"] = key
-        _report_cache["data"] = data
-        _report_cache["ts"] = now
-
+    _report_cache_put(key, data)
     return jsonify(data)
 
 
@@ -955,7 +1036,6 @@ def report():
 @app.route("/api/map", methods=["POST"])
 @login_required
 def map_data():
-    """仅当地图 filter（m-continent/m-country）变化时调用。"""
     d = request.get_json() or {}
     filters = d.get("filters", {})
     level = d.get("level", "world")
@@ -985,14 +1065,11 @@ def map_focus():
     if not focus_name:
         return jsonify({"error": "focus_name is required"}), 400
 
-    # 优先使用 filters（若前端传了），否则回退到 date_range_days
     filters = d.get("filters") or {}
     if not filters and d.get("date_range_days"):
         filters = {"date_range_days": d["date_range_days"]}
 
     ships = apply_filters(get_cached(), filters)
-    print(f"[focus] type={focus_type} name={focus_name!r} "
-          f"filters={filters} total_ships={len(ships)}")
 
     focus_metrics = None
     cities = []
@@ -1015,13 +1092,13 @@ def map_focus():
         if not city_ships:
             fname_lower = focus_name.lower()
             city_ships = [s for s in ships
-                         if (s.get("destination") or "").lower() == fname_lower]
+                          if (s.get("destination") or "").lower() == fname_lower]
         if city_ships:
             focus_metrics = calculate_metrics(city_ships)
             country_of_focus = city_ships[0].get("destination_country")
             if country_of_focus:
                 country_ships = [s for s in ships
-                                if s.get("destination_country") == country_of_focus]
+                                 if s.get("destination_country") == country_of_focus]
                 cities = get_city_stats(country_ships, country=country_of_focus)
 
     if focus_metrics is None:
@@ -1034,6 +1111,7 @@ def map_focus():
         "focus_metrics": focus_metrics,
         "cities": cities,
     })
+
 
 @app.route("/api/export", methods=["POST"])
 @login_required
@@ -1217,61 +1295,6 @@ def db_update_shipment(sid):
     log_action(current_user.id, "db_update", f"shipment={sid}")
     return jsonify({"ok": True})
 
-@admin_required
-def db_update_shipment(sid):
-    data = request.get_json() or {}
-    allowed = ["carrier", "destination", "destination_country",
-               "destination_continent", "status", "priority",
-               "expected_delivery_date", "actual_delivery_date",
-               "delay_reason", "shipping_cost", "order_quantity",
-               "delivered_quantity"]
-    updates = {k: data[k] for k in allowed if k in data}
-    if not updates:
-        return jsonify({"error": "No editable fields"}), 400
-
-    if "status" in updates and updates["status"] not in ("Delivered", "In Transit", "Exception"):
-        return jsonify({"error": "Invalid status"}), 400
-
-    if "destination_country" in updates:
-        known = set(s.get("destination_country") for s in get_cached())
-        if updates["destination_country"] not in known:
-            return jsonify({"error": f"Unknown country: {updates['destination_country']}"}), 400
-
-    for df in ("expected_delivery_date", "actual_delivery_date"):
-        if df in updates and updates[df]:
-            try:
-                datetime.strptime(updates[df], "%Y-%m-%d")
-            except ValueError:
-                return jsonify({"error": f"Invalid {df}"}), 400
-
-    for nf in ("shipping_cost", "order_quantity", "delivered_quantity"):
-        if nf in updates and updates[nf] is not None:
-            try:
-                if nf == "shipping_cost":
-                    float(updates[nf])
-                else:
-                    int(updates[nf])
-            except (TypeError, ValueError):
-                return jsonify({"error": f"Invalid {nf}"}), 400
-
-    conn = get_conn()
-    sets = ", ".join(f"{k} = ?" for k in updates.keys())
-    conn.execute(f"UPDATE shipments SET {sets} WHERE shipment_id = ?",
-                 (*updates.values(), sid))
-    conn.commit()
-    conn.close()
-
-    with _shipments_lock:
-        for i, s in enumerate(_shipments_cache):
-            if s["shipment_id"] == sid:
-                _shipments_cache[i] = {**s, **updates}
-                break
-
-    invalidate_filter_cache()
-    invalidate_report_cache()
-    log_action(current_user.id, "db_update", f"shipment={sid}")
-    return jsonify({"ok": True})
-
 
 @app.route("/api/db/shipments/<sid>", methods=["DELETE"])
 @admin_required
@@ -1288,7 +1311,7 @@ def db_delete_shipment(sid):
 
     with _shipments_lock:
         _shipments_cache[:] = [s for s in _shipments_cache
-                                if s["shipment_id"] != sid]
+                               if s["shipment_id"] != sid]
 
     invalidate_filter_cache()
     invalidate_report_cache()
@@ -1340,7 +1363,6 @@ def admin_toggle_active(uid):
     if not row:
         conn.close()
         return jsonify({"error": "not found"}), 404
-    # 若即将禁用的是一个活跃管理员，检查是否是最后一个
     if row["is_active"] and row["is_admin"]:
         active_admins = conn.execute(
             "SELECT COUNT(*) FROM users WHERE is_admin=1 AND is_active=1").fetchone()[0]
@@ -1385,9 +1407,21 @@ def admin_delete_user(uid):
     if uid == current_user.id:
         return jsonify({"error": "Cannot delete yourself."}), 400
     conn = get_conn()
+    row = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+    # ★ 若即将删除的是一个活跃管理员，检查是否是最后一个
+    if row["is_active"] and row["is_admin"]:
+        active_admins = conn.execute(
+            "SELECT COUNT(*) FROM users WHERE is_admin=1 AND is_active=1").fetchone()[0]
+        if active_admins <= 1:
+            conn.close()
+            return jsonify({"error": "Cannot delete the last active admin."}), 400
     conn.execute("DELETE FROM users WHERE id=?", (uid,))
     conn.commit()
     conn.close()
+    log_action(current_user.id, "user_delete", f"uid={uid} user={row['username']}")
     return jsonify({"ok": True})
 
 
@@ -1539,6 +1573,7 @@ def admin_upload_csv():
     return jsonify({"ok": True, "imported": len(rows),
                     "error_count": len(errors), "errors": errors[:20]})
 
+
 @app.route("/api/admin/simulate-tick", methods=["POST"])
 @admin_required
 def admin_simulate_tick():
@@ -1562,13 +1597,661 @@ def admin_audit():
     return jsonify([dict(r) for r in rows])
 
 
-# ── 模块级初始化：Gunicorn worker 每次 import app 时执行 ──
+# ── 模块级初始化 ──
 logger.info("[startup] running ensure_initialized...")
 try:
     ensure_initialized()
     logger.info("[startup] ensure_initialized OK")
 except Exception as e:
     logger.exception(f"[startup] ensure_initialized FAILED: {e}")
+
+
+# =============================================================
+# App Builder — 应用生成模块
+# =============================================================
+import requests as _http
+
+BUILDER_SYSTEM_PROMPT = """你是前端工程师。根据用户需求生成完整的单文件 HTML 应用。
+
+规则：
+1. 只输出一个 ```html 代码块，无其他文字
+2. CSS/JS 全部内联
+3. 界面语言跟随用户需求
+4. 数据用 localStorage 时，必须用 try/catch 包住（iframe 沙箱可能禁止）
+5. 功能真实可交互，不要占位符
+6. 所有 onclick/onkeydown 引用的函数必须先用 function 声明
+7. 不引用外部资源，除非 CDN 加载 Chart.js / ECharts / 字体
+
+【RouteMind 物流数据接口 — 同源、无需鉴权、iframe 可直接调用】
+当用户需求涉及"物流""订单""数据面板""订单追踪"时，必须调用真实接口而不是造假数据：
+
+1. 获取聚合统计（总量、状态分布、承运商、洲际）：
+   fetch('/api/public/dashboard').then(r=>r.json()).then(d=>{ /* ... */ });
+   返回：{ total, status_distribution:{Delivered,InTransit,Exception},
+           carriers:[{name,count}], continents:[{name,count}] }
+
+2. 分页获取脱敏订单列表（支持筛选）：
+   fetch('/api/public/shipments?page=1&per_page=20&carrier=&country=&status=')
+   返回：{ rows:[{shipment_id,carrier,destination,destination_country,
+                destination_continent,status,priority,ship_date,
+                expected_delivery_date,actual_delivery_date,
+                delay_reason,shipping_cost}],
+           total, page, per_page, pages }
+
+3. 获取筛选下拉选项：
+   fetch('/api/public/filters').then(r=>r.json());
+   返回：{ carriers:[], countries:[], statuses:[] }
+
+调用要点：
+- 直接用相对路径 fetch('/api/public/xxx')，不要加域名
+- 需要在 iframe 里运行，用 async/await 或 .then
+- 数据量大，分页展示，不要一次拉全部
+- 加载失败时显示友好错误提示
+- 图表用 CDN 加载 Chart.js：<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+修改请求时，基于现有代码输出完整新版本，不要省略。"""
+
+
+def _init_builder_tables():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS builder_projects (
+        id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS builder_versions (
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+        instruction TEXT, code TEXT NOT NULL, summary TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (project_id) REFERENCES builder_projects(id) ON DELETE CASCADE)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS builder_shares (
+        id TEXT PRIMARY KEY, project_id TEXT, title TEXT,
+        code TEXT NOT NULL, views INTEGER DEFAULT 0, created_at TEXT NOT NULL)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS builder_settings (
+        user_id INTEGER PRIMARY KEY, provider TEXT, base_url TEXT,
+        api_key TEXT, model TEXT)""")
+    conn.commit()
+    conn.close()
+
+
+_init_builder_tables()
+
+
+@app.route("/builder")
+@login_required
+def builder_page():
+    return render_template("builder.html",
+                           app_state_json=_app_state(current_user, ""))
+
+
+@app.route("/api/builder/projects", methods=["GET"])
+@login_required
+def builder_list_projects():
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM builder_projects WHERE user_id=? ORDER BY updated_at DESC",
+        (current_user.id,)).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/builder/projects/<pid>/versions", methods=["GET"])
+@login_required
+def builder_list_versions(pid):
+    conn = get_conn()
+    own = conn.execute(
+        "SELECT id FROM builder_projects WHERE id=? AND user_id=?",
+        (pid, current_user.id)).fetchone()
+    if not own:
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+    # ★ 不返回完整 code，节省带宽、防意外泄漏
+    rows = conn.execute(
+        "SELECT id, instruction, summary, created_at FROM builder_versions "
+        "WHERE project_id=? ORDER BY created_at DESC", (pid,)).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/builder/versions/<vid>/code", methods=["GET"])
+@login_required
+def builder_get_version_code(vid):
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT v.id, v.code, p.user_id FROM builder_versions v "
+        "JOIN builder_projects p ON p.id = v.project_id "
+        "WHERE v.id = ?", (vid,)).fetchone()
+    conn.close()
+    if not row or row["user_id"] != current_user.id:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"id": row["id"], "code": row["code"] or ""})
+
+
+@app.route("/api/builder/versions", methods=["POST"])
+@login_required
+def builder_save_version():
+    d = request.get_json() or {}
+    project_id = d.get("project_id") or str(uuid.uuid4())[:8]
+    now = utc_now().isoformat()
+    conn = get_conn()
+    if not d.get("project_id"):
+        conn.execute(
+            "INSERT INTO builder_projects (id, user_id, title, created_at, updated_at) "
+            "VALUES (?,?,?,?,?)",
+            (project_id, current_user.id,
+             d.get("title") or "Untitled", now, now))
+    else:
+        conn.execute(
+            "UPDATE builder_projects SET updated_at=? WHERE id=? AND user_id=?",
+            (now, project_id, current_user.id))
+    vid = str(uuid.uuid4())[:10]
+    conn.execute(
+        "INSERT INTO builder_versions (id, project_id, instruction, code, summary, created_at) "
+        "VALUES (?,?,?,?,?,?)",
+        (vid, project_id, d.get("instruction"),
+         d.get("code"), d.get("summary", ""), now))
+    conn.commit()
+    conn.close()
+    return jsonify({"project_id": project_id, "version_id": vid})
+
+
+@app.route("/api/builder/settings", methods=["GET", "POST"])
+@login_required
+def builder_settings():
+    if request.method == "POST":
+        d = request.get_json() or {}
+        conn = get_conn()
+        row = conn.execute("SELECT * FROM builder_settings WHERE user_id=?",
+                           (current_user.id,)).fetchone()
+        provider = d.get("provider", row["provider"] if row else "")
+        base_url = d.get("base_url", row["base_url"] if row else "")
+        model = d.get("model", row["model"] if row else "")
+
+        # 语义：
+        # - body 中包含 "api_key" 字段 → 覆盖（空字符串则清空）
+        # - body 中不含 "api_key" 字段 → 保留原值
+        if "api_key" in d:
+            api_key = d.get("api_key") or ""
+        else:
+            api_key = row["api_key"] if row else ""
+
+        if d.get("clear"):
+            provider = ""
+            base_url = ""
+            model = ""
+            api_key = ""
+
+        conn.execute(
+            "INSERT OR REPLACE INTO builder_settings "
+            "(user_id, provider, base_url, api_key, model) VALUES (?,?,?,?,?)",
+            (current_user.id, provider, base_url, api_key, model))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM builder_settings WHERE user_id=?",
+                       (current_user.id,)).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"configured": False})
+    key = row["api_key"] or ""
+    # ★ 不回传明文 API Key
+    return jsonify({
+        "configured": bool(key),
+        "provider": row["provider"],
+        "base_url": row["base_url"],
+        "model": row["model"],
+        "api_key_preview": ("***" + key[-4:]) if key else "",
+    })
+
+
+@app.route("/api/builder/settings/test", methods=["POST"])
+@login_required
+def builder_settings_test():
+    d = request.get_json() or {}
+    base = (d.get("base_url") or "").strip().rstrip("/")
+    key = (d.get("api_key") or "").strip()
+    model = (d.get("model") or "").strip()
+
+    # ★ 允许"使用已保存的 key" 进行测试
+    if d.get("use_saved_key") and not key:
+        conn = get_conn()
+        row = conn.execute(
+            "SELECT api_key FROM builder_settings WHERE user_id=?",
+            (current_user.id,)).fetchone()
+        conn.close()
+        if row:
+            key = (row["api_key"] or "").strip()
+
+    if not base or not key or not model:
+        return jsonify({"ok": False, "error": "Missing base_url / api_key / model"})
+    if base.endswith("/chat/completions"):
+        endpoint = base
+    else:
+        endpoint = base + "/chat/completions"
+    try:
+        r = _http.post(
+            endpoint,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={"model": model, "messages": [{"role": "user", "content": "hi"}],
+                  "max_tokens": 5},
+            timeout=(10, 30),
+        )
+        if r.status_code != 200:
+            return jsonify({"ok": False, "error": f"HTTP {r.status_code}: {r.text[:200]}"})
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"})
+
+
+@app.route("/api/builder/projects/<pid>", methods=["DELETE"])
+@login_required
+def builder_delete_project(pid):
+    conn = get_conn()
+    own = conn.execute(
+        "SELECT id FROM builder_projects WHERE id=? AND user_id=?",
+        (pid, current_user.id),
+    ).fetchone()
+    if not own:
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+    conn.execute("DELETE FROM builder_versions WHERE project_id=?", (pid,))
+    conn.execute("DELETE FROM builder_projects WHERE id=?", (pid,))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/builder/share", methods=["POST"])
+@login_required
+def builder_share():
+    d = request.get_json() or {}
+    code = d.get("code")
+    if not code:
+        return jsonify({"error": "no code"}), 400
+    sid = secrets.token_urlsafe(8)
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO builder_shares (id, project_id, title, code, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (sid, d.get("project_id"), d.get("title"), code, utc_now().isoformat()))
+    conn.commit()
+    conn.close()
+    return jsonify({"url": f"/s/{sid}"})
+
+
+@app.route("/s/<sid>")
+def shared_app(sid):
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM builder_shares WHERE id=?", (sid,)).fetchone()
+    if not row:
+        conn.close()
+        return "Share link not found", 404
+    conn.execute("UPDATE builder_shares SET views = views + 1 WHERE id=?", (sid,))
+    conn.commit()
+    conn.close()
+    return render_template("shared.html", code=row["code"], title=row["title"])
+
+
+# ============================================================
+# 公开 API：供生成的 app 在 iframe 中调用（无需登录，只读脱敏）
+# ============================================================
+
+@app.route("/api/public/dashboard", methods=["GET"])
+def public_dashboard():
+    ships = get_cached()
+    total = len(ships)
+    status_dist = {"Delivered": 0, "In Transit": 0, "Exception": 0}
+    carrier_counts = {}
+    continent_counts = {}
+
+    for s in ships:
+        st = s.get("status")
+        if st in status_dist:
+            status_dist[st] += 1
+        c = s.get("carrier")
+        if c:
+            carrier_counts[c] = carrier_counts.get(c, 0) + 1
+        ct = s.get("destination_continent")
+        if ct:
+            continent_counts[ct] = continent_counts.get(ct, 0) + 1
+
+    return jsonify({
+        "total": total,
+        "status_distribution": status_dist,
+        "carriers": [{"name": k, "count": v} for k, v in
+                     sorted(carrier_counts.items(), key=lambda kv: -kv[1])],
+        "continents": [{"name": k, "count": v} for k, v in
+                       sorted(continent_counts.items(), key=lambda kv: -kv[1])],
+    })
+
+
+@app.route("/api/public/shipments", methods=["GET"])
+def public_shipments():
+    page = max(1, int(request.args.get("page", 1)))
+    per_page = min(50, max(10, int(request.args.get("per_page", 20))))
+    offset = (page - 1) * per_page
+
+    carrier = request.args.get("carrier", "").strip()
+    country = request.args.get("country", "").strip()
+    status = request.args.get("status", "").strip()
+
+    ships = get_cached()
+    filtered = ships
+    if carrier:
+        filtered = [s for s in filtered if s.get("carrier") == carrier]
+    if country:
+        filtered = [s for s in filtered if s.get("destination_country") == country]
+    if status:
+        filtered = [s for s in filtered if s.get("status") == status]
+
+    total = len(filtered)
+    rows = filtered[offset:offset + per_page]
+
+    allowed = ["shipment_id", "carrier", "destination", "destination_country",
+               "destination_continent", "status", "priority", "ship_date",
+               "expected_delivery_date", "actual_delivery_date",
+               "delay_reason", "shipping_cost"]
+
+    return jsonify({
+        "rows": [{k: r.get(k) for k in allowed} for r in rows],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": max(1, (total + per_page - 1) // per_page),
+    })
+
+
+@app.route("/api/public/filters", methods=["GET"])
+def public_filters():
+    ships = get_cached()
+    carriers = sorted(set(s.get("carrier") for s in ships if s.get("carrier")))
+    countries = sorted(set(s.get("destination_country") for s in ships
+                           if s.get("destination_country")))
+    return jsonify({
+        "carriers": carriers,
+        "countries": countries,
+        "statuses": ["Delivered", "In Transit", "Exception"],
+    })
+
+
+ASSISTANT_SYSTEM_PROMPT = """你是 RouteMind 的物流数据分析助手。
+
+严格限制：
+1. 只回答与当前物流数据相关的问题（延误率、承运商表现、国家风险、成本、OTIF、订单量、在途风险等）
+2. 如果用户问无关问题（天气、编程、故事、常识、自我介绍、"你是谁"等），礼貌拒绝：
+   "我只能回答与当前物流数据相关的问题。你可以问我：延误情况、最差承运商、高风险国家、成本构成等。"
+3. 回答要简洁，控制在 120 字以内，直接给结论，不要铺垫
+4. 必须引用数据中的具体数字，不能编造
+5. 不要输出 markdown 代码块、不要用 ## 标题、不要长篇大论
+6. 不要说"我是 AI""作为助手"之类的话，直接回答
+7. 用户使用中文就中文回答，用英文就英文回答
+
+格式示例：
+"当前延误率 12.3%，主要来自 OceanBridge（19.2%）。建议优先审查该承运商在印度的线路。"
+"""
+
+
+@app.route("/api/assistant", methods=["POST"])
+@login_required
+def assistant_chat():
+    d = request.get_json() or {}
+    question = (d.get("question") or "").strip()
+    report = d.get("report") or {}
+    if not question:
+        return jsonify({"error": "question required"}), 400
+    if not report:
+        return jsonify({"error": "no report data", "fallback": True}), 200
+
+    metrics = report.get("metrics") or {}
+    carriers = (report.get("carriers") or [])[:5]
+    countries = (report.get("countries") or [])[:5]
+    reasons = (report.get("delay_reasons") or [])[:5]
+    cost = report.get("cost_breakdown") or {}
+    ranges = report.get("range_stats") or {}
+
+    context = {
+        "metrics": {k: metrics.get(k) for k in [
+            "total_shipments", "delivered_count", "delayed_count",
+            "in_transit_count", "exception_count", "delay_rate",
+            "on_time_rate", "otif_rate", "eta_accuracy_rate",
+            "avg_delay_days", "p90_delay_days", "at_risk_count",
+            "revenue", "avg_cost_per_shipment",
+        ]},
+        "top_carriers": [{"name": c.get("name"), "delay_rate": c.get("delay_rate"),
+                          "otif_rate": c.get("otif_rate"),
+                          "shipments": c.get("total_shipments")} for c in carriers],
+        "top_countries": [{"name": c.get("name"), "delay_rate": c.get("delay_rate"),
+                           "shipments": c.get("total_shipments")} for c in countries],
+        "top_reasons": [{"name": r.get("name"), "count": r.get("count")} for r in reasons],
+        "cost": cost,
+        "delay_range": ranges,
+    }
+
+    conn = get_conn()
+    s = conn.execute("SELECT * FROM builder_settings WHERE user_id=?",
+                     (current_user.id,)).fetchone()
+    conn.close()
+
+    if not s or not (s["api_key"] or "").strip():
+        return jsonify({"error": "未配置 API Key", "fallback": True}), 200
+
+    base_url = (s["base_url"] or "").strip().rstrip("/")
+    if not base_url:
+        return jsonify({"error": "Base URL 未配置", "fallback": True}), 200
+    endpoint = base_url if base_url.endswith("/chat/completions") \
+                       else base_url + "/chat/completions"
+
+    messages = [
+        {"role": "system", "content": ASSISTANT_SYSTEM_PROMPT},
+        {"role": "user", "content":
+            f"当前物流数据：\n{json.dumps(context, ensure_ascii=False)}\n\n"
+            f"用户问题：{question}"},
+    ]
+
+    try:
+        r = _http.post(
+            endpoint,
+            headers={"Authorization": f"Bearer {s['api_key'].strip()}",
+                     "Content-Type": "application/json"},
+            json={"model": s["model"], "messages": messages,
+                  "stream": False, "temperature": 0.3, "max_tokens": 400},
+            timeout=(10, 45),
+        )
+        if r.status_code != 200:
+            return jsonify({"error": f"LLM {r.status_code}", "fallback": True}), 200
+        data = r.json()
+        answer = ((data.get("choices") or [{}])[0]
+                  .get("message", {}).get("content", "")).strip()
+        if not answer:
+            return jsonify({"error": "empty answer", "fallback": True}), 200
+        return jsonify({"answer": answer})
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}", "fallback": True}), 200
+
+
+@app.route("/api/builder/generate", methods=["POST"])
+@login_required
+def builder_generate():
+    d = request.get_json() or {}
+    instruction = (d.get("instruction") or "").strip()
+    current_code = d.get("current_code") or ""
+    if not instruction:
+        return jsonify({"error": "instruction required"}), 400
+
+    conn = get_conn()
+    s = conn.execute("SELECT * FROM builder_settings WHERE user_id=?",
+                     (current_user.id,)).fetchone()
+    conn.close()
+
+    # 无 Key → 模板兜底
+    if not s or not (s["api_key"] or "").strip():
+        from builder_templates import match_template
+        code, _name = match_template(instruction)
+        if code:
+            def tpl_stream():
+                payload = {"choices": [{"delta": {"content": "```html\n" + code + "\n```"}}]}
+                yield b"data: " + json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n\n"
+                yield b"data: [DONE]\n\n"
+            return Response(
+                tpl_stream(),
+                mimetype="text/event-stream",
+                headers={"Cache-Control": "no-cache",
+                         "X-Accel-Buffering": "no",
+                         "Connection": "close"},
+            )
+        return jsonify({
+            "error": "未配置 API Key。可先试：2048、待办、计算器、番茄钟、记账本、贪吃蛇、天气"
+        }), 400
+
+    base_url = (s["base_url"] or "").strip().rstrip("/")
+    if not base_url:
+        return jsonify({"error": "Base URL 未配置"}), 400
+    if base_url.endswith("/chat/completions"):
+        endpoint = base_url
+    else:
+        endpoint = base_url + "/chat/completions"
+
+    api_key = (s["api_key"] or "").strip()
+    model = (s["model"] or "").strip()
+    if not api_key or not model:
+        return jsonify({"error": "API Key 或模型未配置"}), 400
+
+    MAX_CODE_LEN = 40000
+    if current_code and len(current_code) > MAX_CODE_LEN:
+        half = MAX_CODE_LEN // 2
+        current_code = (
+            current_code[:half]
+            + "\n<!-- ...middle truncated... -->\n"
+            + current_code[-half:]
+        )
+
+    messages = [{"role": "system", "content": BUILDER_SYSTEM_PROMPT}]
+    if current_code:
+        messages.append({
+            "role": "user",
+            "content": f"当前代码：\n```html\n{current_code}\n```\n\n修改要求：{instruction}",
+        })
+    else:
+        messages.append({"role": "user", "content": instruction})
+
+    def sse(obj):
+        return b"data: " + json.dumps(obj, ensure_ascii=False).encode("utf-8") + b"\n\n"
+
+    def stream():
+        r = None
+        max_attempts = 3
+
+        try:
+            for attempt in range(max_attempts):
+                try:
+                    r = _http.post(
+                        endpoint,
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                            "Accept": "text/event-stream",
+                        },
+                        json={
+                            "model": model,
+                            "messages": messages,
+                            "stream": True,
+                        },
+                        stream=True,
+                        timeout=(10, 120),
+                    )
+                except _http.exceptions.RequestException as e:
+                    last_err = f"{type(e).__name__}: {e}"
+                    logger.warning(f"[retry {attempt+1}/{max_attempts}] network error: {last_err}")
+                    if attempt < max_attempts - 1:
+                        yield sse({"retrying": f"网络错误，3秒后重试 ({attempt+2}/{max_attempts})"})
+                        time.sleep(3)
+                        continue
+                    yield sse({"error": f"网络错误（已重试 {max_attempts} 次）: {last_err}"})
+                    yield b"data: [DONE]\n\n"
+                    return
+
+                if r.status_code == 200:
+                    break
+
+                try:
+                    err_body = r.text[:400]
+                except Exception:
+                    err_body = ""
+
+                if r.status_code in (429, 500, 502, 503, 504) and attempt < max_attempts - 1:
+                    wait = 3 + attempt * 2
+                    logger.warning(
+                        f"[retry {attempt+1}] HTTP {r.status_code}, retry in {wait}s: {err_body[:120]}"
+                    )
+                    yield sse({"retrying": f"服务繁忙，{wait} 秒后重试 ({attempt+2}/{max_attempts})"})
+                    time.sleep(wait)
+                    continue
+
+                yield sse({"error": f"LLM HTTP {r.status_code}: {err_body[:250]}"})
+                yield b"data: [DONE]\n\n"
+                return
+
+            if r is None or r.status_code != 200:
+                yield sse({"error": f"重试 {max_attempts} 次仍失败，请换模型或稍后再试"})
+                yield b"data: [DONE]\n\n"
+                return
+
+            ctype = (r.headers.get("Content-Type") or "").lower()
+            if "text/event-stream" not in ctype:
+                try:
+                    data = r.json()
+                    content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+                    if content:
+                        yield sse({"choices": [{"delta": {"content": content}}]})
+                    else:
+                        yield sse({"error": f"非流式响应无 content: {str(data)[:200]}"})
+                except Exception as e:
+                    yield sse({"error": f"无法解析非流式响应: {e}"})
+                yield b"data: [DONE]\n\n"
+                return
+
+            for raw_bytes in r.iter_lines(decode_unicode=False, chunk_size=1024):
+                if not raw_bytes:
+                    continue
+                try:
+                    line_str = raw_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    line_str = raw_bytes.decode("utf-8", errors="replace")
+
+                if line_str.startswith("data:"):
+                    payload = line_str[5:].lstrip()
+                    if payload == "[DONE]":
+                        yield b"data: [DONE]\n\n"
+                        return
+                    yield raw_bytes + b"\n\n"
+                elif line_str.startswith(("event:", "id:", ":", "retry:")):
+                    continue
+                else:
+                    yield b"data: " + raw_bytes + b"\n\n"
+
+        except Exception as e:
+            logger.exception(f"[builder/generate] stream error: {type(e).__name__}: {e}")
+            yield sse({"error": f"流式异常: {type(e).__name__}: {e}"})
+            yield b"data: [DONE]\n\n"
+        finally:
+            if r is not None:
+                try:
+                    r.close()
+                except Exception:
+                    pass
+
+    return Response(
+        stream(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "X-Accel-Buffering": "no",
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Connection": "close",
+        },
+    )
 
 
 if __name__ == "__main__":

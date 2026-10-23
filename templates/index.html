@@ -95,6 +95,9 @@
       <button class="tb-btn" id="theme-toggle" onclick="toggleTheme()" title="Theme">
         <i data-lucide="moon" id="theme-icon"></i>
       </button>
+      <button class="tb-btn" onclick="location.href='/builder'" title="App Builder">
+        <i data-lucide="wand-2"></i><span>App Builder</span>
+      </button>
       <button class="tb-btn" id="ai-toggle-top" onclick="toggleAIPanel()" title="AI Assistant">
         <i data-lucide="bot"></i><span data-i18n="nav.ai">AI</span>
       </button>
@@ -129,6 +132,18 @@
 
     <!-- ================= HOME ================= -->
     <section id="view-home" class="view active">
+      
+      <!-- App Builder 入口卡片 -->
+      <div class="builder-hero">
+        <div class="builder-hero-text">
+          <h2>想做个小应用？试试 App Builder</h2>
+          <p>用一句话描述需求，AI 实时生成完整可运行的 HTML。对话即迭代，版本自动存档。</p>
+        </div>
+        <a href="/builder" class="btn btn-primary">
+          <i data-lucide="wand-2"></i> 打开 App Builder
+        </a>
+      </div>
+      
       <header class="home-hero">
         <h1 data-i18n="home.greeting">What do you want to investigate?</h1>
         <p data-i18n="home.sub">Describe your logistics question in natural language.</p>

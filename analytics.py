@@ -31,6 +31,7 @@ def is_delivered(s):
             and bool(s.get("actual_delivery_date"))
             and bool(s.get("expected_delivery_date")))
 
+
 def is_delayed(s):
     d = get_delay_days(s)
     return d is not None and d > 0
@@ -88,32 +89,48 @@ def percentile(values, p):
 
 
 def apply_filters(shipments, filters):
+    """应用筛选。
+
+    语义说明（重要）：
+    - min_delay_days / max_delay_days 只约束「已送达」订单的延误天数。
+    - In Transit / Exception 订单没有 actual_delivery_date（d is None），
+      应保留在结果集中，否则 metrics.total_shipments / in_transit_count /
+      at_risk_count 会全部归零，KPI 与状态饼图会打架。
+    """
     result = shipments
+
     if filters.get("date_range_days"):
         cutoff = date.today() - timedelta(days=int(filters["date_range_days"]))
         result = [s for s in result
-                  if parse_date(s["ship_date"]) and parse_date(s["ship_date"]) >= cutoff]
+                  if (lambda d: d and d >= cutoff)(parse_date(s.get("ship_date")))]
+
     if filters.get("carrier"):
         result = [s for s in result if s["carrier"] == filters["carrier"]]
     if filters.get("priority"):
         result = [s for s in result if s.get("priority") == filters["priority"]]
     if filters.get("continent"):
-        result = [s for s in result if s.get("destination_continent") == filters["continent"]]
+        result = [s for s in result
+                  if s.get("destination_continent") == filters["continent"]]
     if filters.get("country"):
-        result = [s for s in result if s.get("destination_country") == filters["country"]]
+        result = [s for s in result
+                  if s.get("destination_country") == filters["country"]]
 
     min_d = filters.get("min_delay_days")
     max_d = filters.get("max_delay_days")
     if min_d not in (None, "") or max_d not in (None, ""):
-        # 与 get_delay_range_stats 口径对齐：min 为空时取 1，不纳入 d=0
         mn = int(min_d) if min_d not in (None, "") else 1
         mx = int(max_d) if max_d not in (None, "") else 10**6
         out = []
         for s in result:
             d = get_delay_days(s)
-            if d is not None and mn <= d <= mx:
+            if d is None:
+                # 没有 actual_delivery_date → 属于 In Transit / Exception
+                # 延误区间只约束已送达，这里保留
+                out.append(s)
+            elif mn <= d <= mx:
                 out.append(s)
         result = out
+
     return result
 
 
