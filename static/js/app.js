@@ -44,9 +44,10 @@ const I18N = {
     "home.generate": "Generate Report",
     "home.newAnalysis": "New Analysis",
 
-    "builder.promo.title": "Want to build a small app? Try App Builder",
-    "builder.promo.desc": "Describe your idea in one sentence — AI generates a complete, runnable HTML app in real time. Iterate by chatting; every version is auto-archived.",
-    "builder.promo.btn": "Open App Builder",
+    "brand.sub": "AI Logistics Studio",
+    "builderHero.title": "Want to build a small app? Try App Builder",
+    "builderHero.subtitle": "Describe in one sentence — AI generates complete runnable HTML in real time. Chat is the iteration, versions auto-save.",
+    "builderHero.cta": "Open App Builder",
 
     "history.title": "Projects",
     "history.empty": "No projects yet.",
@@ -420,9 +421,10 @@ const I18N = {
     "home.generate": "生成报告",
     "home.newAnalysis": "新建分析",
 
-    "builder.promo.title": "想做个小应用？试试 App Builder",
-    "builder.promo.desc": "用一句话描述需求，AI 实时生成完整可运行的 HTML。对话即迭代，版本自动存档。",
-    "builder.promo.btn": "打开 App Builder",
+    "brand.sub": "AI 物流智能工作室",
+    "builderHero.title": "想做个小应用？试试 App Builder",
+    "builderHero.subtitle": "用一句话描述需求，AI 实时生成完整可运行的 HTML。对话即迭代，版本自动存档。",
+    "builderHero.cta": "打开 App Builder",
 
     "history.title": "项目",
     "history.empty": "暂无项目。",

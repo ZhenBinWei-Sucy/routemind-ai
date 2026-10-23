@@ -1,22 +1,49 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{{ title or "分享的应用" }} — RouteMind</title>
+<title>{% if title %}{{ title }}{% else %}Shared App{% endif %} — RouteMind</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: sans-serif; height: 100vh; display: flex; flex-direction: column; background: #0d1220; }
   .bar { padding: 12px 20px; background: #111827; color: #e6ebf5; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1f2b3e; }
-  .bar a { color: #60a5fa; text-decoration: none; font-size: 14px; }
+  .bar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60vw; }
+  .bar a { color: #60a5fa; text-decoration: none; font-size: 14px; flex-shrink: 0; margin-left: 12px; }
   iframe { flex: 1; border: none; width: 100%; }
 </style>
 </head>
 <body>
   <div class="bar">
-    <span>{{ title or "分享的应用" }}</span>
-    <a href="/builder">我也要做一个 →</a>
+    <span id="bar-title" data-has-title="{{ '1' if title else '0' }}">
+      {% if title %}{{ title }}{% else %}Shared App{% endif %}
+    </span>
+    <a href="/builder" id="bar-cta"
+       data-en="Build your own →"
+       data-zh="我也要做一个 →">Build your own →</a>
   </div>
   <iframe sandbox="allow-scripts allow-forms allow-modals" srcdoc="{{ code }}"></iframe>
+  <script>
+    (function () {
+      var lang = (navigator.language || "en").toLowerCase().indexOf("zh") === 0 ? "zh" : "en";
+      document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+
+      // CTA 按钮
+      var cta = document.getElementById("bar-cta");
+      if (cta) {
+        var v = cta.getAttribute("data-" + lang);
+        if (v) cta.textContent = v;
+      }
+
+      // 标题：用户填了 title → 尊重原样；没填 → 按浏览器语言用 fallback
+      var bar = document.getElementById("bar-title");
+      var titleEl = document.querySelector("title");
+      if (bar && bar.dataset.hasTitle === "0") {
+        var fallback = lang === "zh" ? "分享的应用" : "Shared App";
+        bar.textContent = fallback;
+        if (titleEl) titleEl.textContent = fallback + " — RouteMind";
+      }
+    })();
+  </script>
 </body>
 </html>
