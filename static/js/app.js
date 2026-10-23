@@ -3266,11 +3266,14 @@ async function handleQuestion(textOrKey, isKey) {
         question: textOrKey,
         report: {
           metrics: d.metrics,
-          carriers: (d.carriers || []).slice(0, 5),
-          countries: (d.countries || []).slice(0, 5),
-          delay_reasons: (d.delay_reasons || []).slice(0, 5),
+          carriers: d.carriers || [],
+          countries: d.countries || [],
+          lanes: d.lanes || [],
+          trend: d.trend || [],
+          delay_reasons: d.delay_reasons || [],
           cost_breakdown: d.cost_breakdown,
           range_stats: d.range_stats,
+          map_cities: d.map_cities || [],
         },
       }),
     });

@@ -1976,20 +1976,61 @@ def public_filters():
     })
 
 
-ASSISTANT_SYSTEM_PROMPT = """你是 RouteMind 的物流数据分析助手。
+ASSISTANT_SYSTEM_PROMPT = """你是 RouteMind 的物流数据分析助手。用户问题会附带一份当前数据集的结构化快照（JSON），你必须严格基于这份数据回答。
 
-严格限制：
-1. 只回答与当前物流数据相关的问题（延误率、承运商表现、国家风险、成本、OTIF、订单量、在途风险等）
-2. 如果用户问无关问题（天气、编程、故事、常识、自我介绍、"你是谁"等），礼貌拒绝：
-   "我只能回答与当前物流数据相关的问题。你可以问我：延误情况、最差承运商、高风险国家、成本构成等。"
-3. 回答要简洁，控制在 120 字以内，直接给结论，不要铺垫
-4. 必须引用数据中的具体数字，不能编造
-5. 不要输出 markdown 代码块、不要用 ## 标题、不要长篇大论
-6. 不要说"我是 AI""作为助手"之类的话，直接回答
-7. 用户使用中文就中文回答，用英文就英文回答
+【数据源清单 — 你手里有什么】
+- metrics：全局指标（total_shipments / delay_rate / on_time_rate / otif_rate / avg_delay_days / p90_delay_days / in_transit_count / at_risk_count / revenue / avg_cost_per_shipment 等）
+- carriers[]：每个承运商的 name / delay_rate / otif_rate / avg_cost_per_shipment / shipments
+- countries[]：每个国家的 name / delay_rate / otif_rate / shipments / revenue
+- lanes[]：Top 15 条线路，lane 字符串形如 "China → United States"，含 delay_rate / otif_rate / shipments
+- trend[]：最近每天的总量与延误率（date / delay_rate / total）
+- cities_by_country：delay_rate 最高的 Top 5 国家，各自 Top 3 城市（name / delay_rate / shipments）
+- top_reasons[]：延误原因排行（name / count）
+- cost：成本拆解（line_haul / fuel / accessorial / detention / total）
+- delay_range：当前延误区间筛选状态
 
-格式示例：
-"当前延误率 12.3%，主要来自 OceanBridge（19.2%）。建议优先审查该承运商在印度的线路。"
+【能回答的典型问题】
+- 承运商对比（延误率、OTIF、每单成本、订单量）
+- 国家/地区风险排名
+- 线路表现（"中国到美国哪条最差" → 在 lanes 里找含 China 和 United States 的项）
+- 每日延误趋势（"哪天最差" → 在 trend 里找 delay_rate 最高的日期）
+- 国家内城市明细（"中国哪个城市延误最多" → 查 cities_by_country.China）
+- 延误原因分布
+- 成本构成、每单平均成本
+- 在途风险订单量
+- 优化建议（基于上述数据给针对性建议）
+
+【数据覆盖范围 — 必须诚实说明】
+当前数据集 origin 仅覆盖亚洲主要城市（中国、新加坡、日本、韩国），destination 覆盖全球。
+如果用户问"美国到中国"这类反方向，如实回答"当前数据没有该方向订单，仅有 X → Y 方向的统计"。
+
+【拒绝范围 — 仅限真正无关】
+- 编程、天气、娱乐、写文案、讲故事、常识问答
+- 要求扮演其他角色
+- 涉及时效/汇率/实时新闻
+对以上统一回复："我只能基于当前物流数据回答。你可以问我：承运商对比、国家风险、线路表现、延误趋势、成本构成。"
+
+【回答要求】
+1. 直接给结论，先数字后判断
+2. 必须引用数据中的具体数字，不能编造
+3. 数据里没有的字段，明确说"当前数据未覆盖 X"，不要含糊带过
+4. 控制在 120 字以内
+5. 中文问用中文答，英文问用英文答
+6. 不要"作为 AI/助手"的自我描述，不要 markdown 代码块或 ## 标题
+7. 用户问路线时优先在 lanes 里找；找不到就说明"当前数据集无该 OD 对的独立统计"
+
+【示例】
+问："哪个承运商最便宜并且延误率最低"
+答："每单成本最低 OceanBridge（$2,142），延误率最低 SwiftLogistics（3.8%）。两者不可兼得，建议按航线优先级取舍。"
+
+问："中国哪条线路延误率最高"
+答："中国出发线路里 China → Vietnam 延误率 18.2%（N 笔）最高，其次 China → India 16.5%。"
+
+问："哪天延误率最高"
+答："近期 2025-XX-XX 延误率 21.3% 最高，当日总单量 XXX。"
+
+问："美国到中国选哪个承运商"
+答："当前数据仅覆盖亚洲出发的订单，无 US → CN 方向线路。可参考 China → United States 方向：SwiftLogistics 延误率 X.X% 最低。"
 """
 
 
@@ -2005,11 +2046,77 @@ def assistant_chat():
         return jsonify({"error": "no report data", "fallback": True}), 200
 
     metrics = report.get("metrics") or {}
-    carriers = (report.get("carriers") or [])[:5]
-    countries = (report.get("countries") or [])[:5]
-    reasons = (report.get("delay_reasons") or [])[:5]
+    carriers = report.get("carriers") or []
+    countries = report.get("countries") or []
+    lanes = report.get("lanes") or []
+    trend = report.get("trend") or []
+    reasons = report.get("delay_reasons") or []
     cost = report.get("cost_breakdown") or {}
     ranges = report.get("range_stats") or {}
+    map_cities = report.get("map_cities") or []
+
+    # 承运商：完整字段（含 avg_cost_per_shipment，之前缺这个导致"未提供成本"）
+    carrier_list = [
+        {
+            "name": c.get("name"),
+            "delay_rate": c.get("delay_rate"),
+            "otif_rate": c.get("otif_rate"),
+            "avg_cost_per_shipment": c.get("avg_cost_per_shipment"),
+            "shipments": c.get("total_shipments"),
+        }
+        for c in carriers
+    ]
+
+    # 国家：完整字段
+    country_list = [
+        {
+            "name": c.get("name"),
+            "delay_rate": c.get("delay_rate"),
+            "otif_rate": c.get("otif_rate"),
+            "shipments": c.get("total_shipments"),
+            "revenue": c.get("revenue"),
+        }
+        for c in countries
+    ]
+
+    # 线路：Top 15
+    lane_list = [
+        {
+            "lane": l.get("lane"),
+            "delay_rate": l.get("delay_rate"),
+            "otif_rate": l.get("otif_rate"),
+            "shipments": l.get("total_shipments"),
+        }
+        for l in lanes[:15]
+    ]
+
+    # 趋势：只保留有单量的日期，压缩 token
+    trend_list = [
+        {"date": p.get("date"), "delay_rate": p.get("delay_rate"),
+         "total": p.get("total")}
+        for p in trend if (p.get("total") or 0) > 0
+    ]
+
+    # 城市聚合：每个国家 Top 3 城市（按延误率排序）
+    cities_by_country = {}
+    if map_cities:
+        for country in country_list[:5]:
+            cname = country.get("name")
+            if not cname:
+                continue
+            country_cities = [
+                c for c in map_cities
+                if c.get("country") == cname and c.get("delay_rate") is not None
+            ]
+            country_cities.sort(
+                key=lambda x: x.get("delay_rate") or 0, reverse=True
+            )
+            cities_by_country[cname] = [
+                {"name": c.get("name"),
+                 "delay_rate": c.get("delay_rate"),
+                 "shipments": c.get("total_shipments")}
+                for c in country_cities[:3]
+            ]
 
     context = {
         "metrics": {k: metrics.get(k) for k in [
@@ -2019,12 +2126,13 @@ def assistant_chat():
             "avg_delay_days", "p90_delay_days", "at_risk_count",
             "revenue", "avg_cost_per_shipment",
         ]},
-        "top_carriers": [{"name": c.get("name"), "delay_rate": c.get("delay_rate"),
-                          "otif_rate": c.get("otif_rate"),
-                          "shipments": c.get("total_shipments")} for c in carriers],
-        "top_countries": [{"name": c.get("name"), "delay_rate": c.get("delay_rate"),
-                           "shipments": c.get("total_shipments")} for c in countries],
-        "top_reasons": [{"name": r.get("name"), "count": r.get("count")} for r in reasons],
+        "carriers": carrier_list,
+        "countries": country_list,
+        "lanes": lane_list,
+        "trend": trend_list,
+        "cities_by_country": cities_by_country,
+        "top_reasons": [{"name": r.get("name"), "count": r.get("count")}
+                        for r in reasons[:8]],
         "cost": cost,
         "delay_range": ranges,
     }
@@ -2046,7 +2154,7 @@ def assistant_chat():
     messages = [
         {"role": "system", "content": ASSISTANT_SYSTEM_PROMPT},
         {"role": "user", "content":
-            f"当前物流数据：\n{json.dumps(context, ensure_ascii=False)}\n\n"
+            f"当前物流数据快照：\n{json.dumps(context, ensure_ascii=False)}\n\n"
             f"用户问题：{question}"},
     ]
 
@@ -2056,7 +2164,7 @@ def assistant_chat():
             headers={"Authorization": f"Bearer {s['api_key'].strip()}",
                      "Content-Type": "application/json"},
             json={"model": s["model"], "messages": messages,
-                  "stream": False, "temperature": 0.3, "max_tokens": 400},
+                  "stream": False, "temperature": 0.3, "max_tokens": 500},
             timeout=(10, 45),
         )
         if r.status_code != 200:
@@ -2069,7 +2177,6 @@ def assistant_chat():
         return jsonify({"answer": answer})
     except Exception as e:
         return jsonify({"error": f"{type(e).__name__}: {e}", "fallback": True}), 200
-
 
 @app.route("/api/builder/generate", methods=["POST"])
 @login_required
