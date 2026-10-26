@@ -1174,6 +1174,12 @@ function applyLang(lang) {
     if ($("chat-log") && $("chat-log").children.length === 0) {
       renderChatOptions(defaultOptions());
     }
+
+    // ★ 切语言后重新生成 insights（新语言）
+    const reportView = $("view-report");
+    if (reportView && reportView.classList.contains("active")) {
+      fetchLLMInsights(state.lastData, state.computeSeq);
+    }
   }
   populateFilterSelects();
   populateDbFilterSelects();
@@ -3232,14 +3238,23 @@ function renderReport(data) {
 // =============================================================
 // LLM 结论与建议（异步增强，失败保留本地模板）
 // =============================================================
+let _insightsToken = 0;
+
 async function fetchLLMInsights(data, seq) {
   const reportBody = $("report-body");
   if (!reportBody || !data || !data.metrics) return;
 
-  const loadingId = "insights-loading-" + Date.now();
-  const loadingHtml = state.lang === "zh"
+  const myToken = ++_insightsToken;
+  const requestLang = state.lang;
+
+  const loadingId = "insights-loading-" + myToken;
+  const loadingHtml = requestLang === "zh"
     ? "🤖 AI 正在生成深度分析…"
     : "🤖 AI is analyzing…";
+
+  // 移除旧 loading（防止多次触发留下多个）
+  document.querySelectorAll('[id^="insights-loading-"]').forEach(el => el.remove());
+
   reportBody.insertAdjacentHTML("beforeend",
     `<div id="${loadingId}" style="margin-top:20px;padding:12px 16px;
        background:rgba(96,165,250,.06);border-left:3px solid var(--accent);
@@ -3260,11 +3275,14 @@ async function fetchLLMInsights(data, seq) {
           cost_breakdown: data.cost_breakdown,
           range_stats: data.range_stats,
         },
-        lang: state.lang,
+        lang: requestLang,
       }),
     });
 
-    if (seq !== state.computeSeq) {
+    // 数据变了 / 语言变了 / 有更新的请求 → 丢弃这次结果
+    if (myToken !== _insightsToken
+        || seq !== state.computeSeq
+        || requestLang !== state.lang) {
       const el = $(loadingId);
       if (el) el.remove();
       return;
