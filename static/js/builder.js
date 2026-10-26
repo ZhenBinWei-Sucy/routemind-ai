@@ -188,6 +188,7 @@
   };
 
   let lang = localStorage.getItem("builder_lang") || "zh";
+  let clientSessionId = Date.now().toString(36);
 
   function t(key, vars) {
     let s = (I18N[lang] && I18N[lang][key]) || I18N.en[key] || key;
@@ -215,7 +216,6 @@
       b.classList.toggle("active", b.dataset.lang === lang);
     });
 
-    // 重新渲染动态部分
     updateModelStatus();
     if (settings.configured) fillSettingsForm();
     renderWelcomeIfEmpty();
@@ -230,7 +230,6 @@
     renderGenButtonIdle();
   }
 
-  // 语言切换按钮绑定
   document.querySelectorAll("#lang-switch button").forEach((btn) => {
     btn.addEventListener("click", () => applyLang(btn.dataset.lang));
   });
@@ -252,18 +251,20 @@
   let abortController = null;
 
   const PROVIDERS = [
+    { id: "groq", name: "Groq", baseUrl: "https://api.groq.com/openai/v1",
+      models: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "openai/gpt-oss-120b"] },
     { id: "openai", name: "OpenAI", baseUrl: "https://api.openai.com/v1",
       models: ["gpt-4o-mini", "gpt-4o", "gpt-4.1"] },
     { id: "deepseek", name: "DeepSeek", baseUrl: "https://api.deepseek.com/v1",
       models: ["deepseek-chat", "deepseek-reasoner"] },
+    { id: "gemini", name: "Google Gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+      models: ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-2.5-flash"] },
     { id: "moonshot", name: "Kimi", baseUrl: "https://api.moonshot.cn/v1",
       models: ["moonshot-v1-32k", "kimi-k2-0905-preview"] },
     { id: "dashscope", name: "通义千问", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
       models: ["qwen-plus", "qwen-max", "qwen3-coder-plus"] },
     { id: "zhipu", name: "智谱 GLM", baseUrl: "https://open.bigmodel.cn/api/paas/v4",
       models: ["glm-4.6", "glm-4-plus", "glm-4-flash"] },
-    { id: "siliconflow", name: "硅基流动", baseUrl: "https://api.siliconflow.cn/v1",
-      models: ["deepseek-ai/DeepSeek-V3", "Qwen/Qwen2.5-72B-Instruct"] },
     { id: "openrouter", name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1",
       models: ["anthropic/claude-sonnet-4.5", "openai/gpt-4o-mini"] },
     { id: "custom", name: "自定义", baseUrl: "", models: [] },
@@ -288,36 +289,120 @@
   }
 
   // ============================================================
-  // 沙箱 iframe localStorage polyfill
+  // 持久化桥：iframe → 父页面 localStorage
   // ============================================================
+  function getPreviewNs() {
+    return "appbuilder:preview:" + (currentProjectId || ("new-" + clientSessionId));
+  }
+
+  function getPreviewData(ns) {
+    try {
+      return JSON.parse(localStorage.getItem(ns) || "{}");
+    } catch (e) {
+      return {};
+    }
+  }
+
   function wrapSrcdoc(html) {
     if (!html) return html;
-    const polyfill = `<script>
+
+    const ns = getPreviewNs();
+    const initialData = getPreviewData(ns);
+    // 防止 </script> 提前闭合
+    const dataJSON = JSON.stringify(initialData)
+      .replace(/</g, "\\u003c")
+      .replace(/>/g, "\\u003e")
+      .replace(/&/g, "\\u0026");
+    const nsJSON = JSON.stringify(ns);
+
+    const injector = `<script>
 (function(){
-  try {
-    window.localStorage.setItem('__probe__', '1');
-    window.localStorage.removeItem('__probe__');
-  } catch (e) {
-    var store = {};
-    function make() {
-      return {
-        getItem: function(k){ return Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null; },
-        setItem: function(k, v){ store[k] = String(v); },
-        removeItem: function(k){ delete store[k]; },
-        clear: function(){ store = {}; },
-        key: function(i){ var ks = Object.keys(store); return i < ks.length ? ks[i] : null; },
-        get length(){ return Object.keys(store).length; }
-      };
-    }
-    try { Object.defineProperty(window, 'localStorage', { configurable: true, value: make() }); } catch (e2) {}
-    try { Object.defineProperty(window, 'sessionStorage', { configurable: true, value: make() }); } catch (e2) {}
+  var NS = ${nsJSON};
+  var store = {};
+  try { store = (${dataJSON}) || {}; } catch (e) { store = {}; }
+
+  function notify(key, value) {
+    try {
+      window.parent.postMessage(
+        { __appbuilder: true, ns: NS, key: key, value: value }, "*"
+      );
+    } catch (e) {}
   }
+
+  var fakeStorage = {
+    getItem: function(k) {
+      return Object.prototype.hasOwnProperty.call(store, k) ? String(store[k]) : null;
+    },
+    setItem: function(k, v) {
+      var sv = String(v);
+      store[k] = sv;
+      notify(k, sv);
+    },
+    removeItem: function(k) {
+      delete store[k];
+      notify(k, null);
+    },
+    clear: function() {
+      store = {};
+      notify("__clear__", null);
+    },
+    key: function(i) {
+      var ks = Object.keys(store);
+      return i < ks.length ? ks[i] : null;
+    }
+  };
+  try {
+    Object.defineProperty(fakeStorage, "length", {
+      get: function() { return Object.keys(store).length; }
+    });
+  } catch (e) {}
+
+  try {
+    Object.defineProperty(window, "localStorage", { configurable: true, value: fakeStorage });
+  } catch (e) { try { window.localStorage = fakeStorage; } catch (e2) {} }
+  try {
+    Object.defineProperty(window, "sessionStorage", { configurable: true, value: fakeStorage });
+  } catch (e) { try { window.sessionStorage = fakeStorage; } catch (e2) {} }
+
+  window.__APP_INIT_DATA__ = store;
 })();
 <\/script>`;
-    if (/<head[^>]*>/i.test(html)) return html.replace(/<head[^>]*>/i, (m) => m + polyfill);
-    if (/<html[^>]*>/i.test(html)) return html.replace(/<html[^>]*>/i, (m) => m + polyfill);
-    return polyfill + html;
+
+    if (/<head[^>]*>/i.test(html)) {
+      return html.replace(/<head[^>]*>/i, (m) => m + injector);
+    }
+    if (/<html[^>]*>/i.test(html)) {
+      return html.replace(/<html[^>]*>/i, (m) => m + injector);
+    }
+    return injector + html;
   }
+
+  // 父页面接收 iframe 消息，持久化到父页面 localStorage
+  window.addEventListener("message", function (e) {
+    const d = e.data;
+    if (!d || d.__appbuilder !== true) return;
+
+    const iframe = $("app-frame");
+    if (!iframe || e.source !== iframe.contentWindow) return;
+
+    if (typeof d.ns !== "string" || d.ns.indexOf("appbuilder:preview:") !== 0) return;
+
+    try {
+      if (d.key === "__clear__") {
+        localStorage.removeItem(d.ns);
+        return;
+      }
+      const all = getPreviewData(d.ns);
+      if (d.value === null || d.value === undefined) {
+        delete all[d.key];
+      } else {
+        all[d.key] = d.value;
+      }
+      localStorage.setItem(d.ns, JSON.stringify(all));
+    } catch (err) {
+      // 忽略 localStorage 满 / 隐私模式等异常
+    }
+  });
 
   // ============================================================
   // Welcome / 聊天区
@@ -398,6 +483,7 @@
   }
 
   window.newProject = function () {
+    clientSessionId = Date.now().toString(36);
     currentProjectId = null;
     currentCode = "";
     versions = [];
@@ -412,9 +498,7 @@
     $("version-list").innerHTML = "";
 
     $("chat-log").innerHTML = welcomeHTML();
-    const titleEl = $("project-title");
-    titleEl.setAttribute("data-i18n", "builder.untitled");   // ★ 恢复
-    titleEl.textContent = t("builder.untitled");
+    $("project-title").textContent = t("builder.untitled");
     $("instruction").value = "";
     $("instruction").focus();
 
@@ -426,7 +510,6 @@
     currentProjectId = pid;
     $("project-title").textContent = title;
 
-    // ★ 清空上一个项目残留的对话
     const log = $("chat-log");
     if (log) log.innerHTML = "";
 
@@ -461,6 +544,7 @@
         toast(data.error || t("builder.shareFailed"), "error");
         return;
       }
+      try { localStorage.removeItem("appbuilder:preview:" + pid); } catch (e) {}
       if (currentProjectId === pid) {
         window.newProject();
       }
@@ -511,7 +595,6 @@
     const v = versions.find(x => x.id === vid);
     if (!v) return;
 
-    // 如果列表没有带 code（后端已不再回 code），需要单独拉
     let code = v.code;
     if (typeof code !== "string") {
       try {
@@ -531,13 +614,11 @@
     renderCode(code);
     renderVersions(vid);
 
-    // 只在需要时切到预览 tab（openProject 首次加载时传 keepTab=true）
     if (!keepTab) {
       switchTab("preview");
     }
     const iframe = $("app-frame");
     iframe.srcdoc = "";
-    // 用双 rAF 保证 iframe 已可见
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         iframe.srcdoc = wrapSrcdoc(code);
@@ -548,7 +629,6 @@
   function restoreChatHistory() {
     const log = $("chat-log");
     if (!log || !versions.length) return;
-    // ★ 删掉：if (log.querySelector(".chat-msg")) return;
 
     const sorted = [...versions].sort((a, b) => {
       const ta = new Date(a.created_at).getTime() || 0;
@@ -652,7 +732,7 @@
       } else {
         settings = {
           configured: false,
-          provider: "openai",
+          provider: "groq",
           baseUrl: "",
           model: "",
           apiKeyPreview: "",
@@ -661,7 +741,7 @@
     } catch (e) {
       settings = {
         configured: false,
-        provider: "openai",
+        provider: "groq",
         baseUrl: "",
         model: "",
         apiKeyPreview: "",
@@ -688,7 +768,6 @@
   };
 
   function fillSettingsForm() {
-    // ★ 永远不把明文写进 input.value
     const keyInput = $("s-api-key");
     keyInput.value = "";
     keyInput.type = "password";
@@ -717,11 +796,9 @@
     if (keyValue) {
       body.api_key = keyValue;
     } else if (!settings.configured) {
-      // 从未配置过，且这次没输入 key
       $("s-error").textContent = t("builder.needApiKey");
       return;
     }
-    // else: 已配置过，留空 → 不发 api_key，服务端保留原值
 
     if (!body.base_url || !body.model) {
       $("s-error").textContent = t("builder.needApiKey");
@@ -752,7 +829,6 @@
       base_url: $("s-base-url").value.trim(),
       model: $("s-model").value.trim(),
     };
-    // 如果留空但已配置过，让服务端用存储的 key 测试
     if (!keyValue && settings.configured) {
       delete body.api_key;
       body.use_saved_key = true;
@@ -787,7 +863,7 @@
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        provider: "openai",
+        provider: "groq",
         api_key: "",
         base_url: "",
         model: "",
@@ -796,7 +872,7 @@
     });
     settings = {
       configured: false,
-      provider: "openai",
+      provider: "groq",
       baseUrl: "",
       model: "",
       apiKeyPreview: "",
@@ -935,7 +1011,26 @@
         if (payload === "[DONE]") { gotDone = true; closeReader(); return; }
         try {
           const j = JSON.parse(payload);
+
+          // 兼容旧格式
           if (j.retrying) { msgEl.textContent = `⏳ ${j.retrying}`; return; }
+
+          // 新事件
+          if (j.stage === "attempt") {
+            msgEl.textContent = j.attempt === 1
+              ? t("builder.generating")
+              : `🔄 第 ${j.attempt} 次尝试…`;
+            return;
+          }
+          if (j.stage === "retry") {
+            msgEl.textContent = `⏳ 修改未达标（${j.reason}），重试中…`;
+            return;
+          }
+          if (j.stage === "fallback") {
+            msgEl.textContent = `⚡ ${j.reason || "使用快速生成"}`;
+            return;
+          }
+
           if (j.error) { fatalError = j.error; closeReader(); return; }
           const delta = j.choices?.[0]?.delta?.content || "";
           if (delta) {
@@ -948,7 +1043,7 @@
               if (partial) $("app-frame").srcdoc = wrapSrcdoc(partial);
             }
           }
-        } catch (e) { /* ignore malformed */ }
+        } catch (e) {}
       };
 
       while (!fatalError && !gotDone && !aborted) {
@@ -1019,7 +1114,6 @@
       msgEl.className = "chat-msg assistant";
       msgEl.textContent = t("builder.done", { n: html.length });
 
-      // 先恢复 UI，再后台保存
       generating = false;
       abortController = null;
       clearTimeout(hardTimeout);
@@ -1039,8 +1133,30 @@
         }, 8000).then(r => r.json());
 
         if (save && save.project_id) {
+          const wasNew = !currentProjectId;
+          if (wasNew) {
+            const oldNs = "appbuilder:preview:new-" + clientSessionId;
+            const newNs = "appbuilder:preview:" + save.project_id;
+            try {
+              const temp = localStorage.getItem(oldNs);
+              if (temp) {
+                localStorage.setItem(newNs, temp);
+                localStorage.removeItem(oldNs);
+              }
+            } catch (e) {}
+          }
           currentProjectId = save.project_id;
           $("project-title").textContent = instruction.slice(0, 30);
+
+          if (wasNew) {
+            const iframe = $("app-frame");
+            iframe.srcdoc = "";
+            requestAnimationFrame(() => {
+              requestAnimationFrame(() => {
+                iframe.srcdoc = wrapSrcdoc(html);
+              });
+            });
+          }
         }
       } catch (e) {
         console.warn("[save version] failed or timeout:", e);

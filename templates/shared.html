@@ -22,20 +22,21 @@
        data-en="Build your own →"
        data-zh="我也要做一个 →">Build your own →</a>
   </div>
-  <iframe sandbox="allow-scripts allow-forms allow-modals" srcdoc="{{ code }}"></iframe>
+  <iframe id="shared-frame" sandbox="allow-scripts allow-forms allow-modals"></iframe>
+
+  <script id="app-payload" type="application/json">{{ code | tojson }}</script>
+
   <script>
     (function () {
       var lang = (navigator.language || "en").toLowerCase().indexOf("zh") === 0 ? "zh" : "en";
       document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
 
-      // CTA 按钮
       var cta = document.getElementById("bar-cta");
       if (cta) {
         var v = cta.getAttribute("data-" + lang);
         if (v) cta.textContent = v;
       }
 
-      // 标题：用户填了 title → 尊重原样；没填 → 按浏览器语言用 fallback
       var bar = document.getElementById("bar-title");
       var titleEl = document.querySelector("title");
       if (bar && bar.dataset.hasTitle === "0") {
@@ -43,6 +44,47 @@
         bar.textContent = fallback;
         if (titleEl) titleEl.textContent = fallback + " — RouteMind";
       }
+
+      var html;
+      try {
+        var payloadEl = document.getElementById("app-payload");
+        html = JSON.parse(payloadEl.textContent);
+      } catch (e) {
+        document.getElementById("shared-frame").srcdoc =
+          '<body style="font-family:sans-serif;padding:40px;color:#f87171;">' +
+          'Failed to load shared app: ' + (e && e.message ? e.message : "parse error") +
+          '</body>';
+        return;
+      }
+      if (typeof html !== "string") {
+        document.getElementById("shared-frame").srcdoc =
+          '<body style="font-family:sans-serif;padding:40px;color:#f87171;">Invalid payload</body>';
+        return;
+      }
+
+      var polyfill = '<script>(function(){' +
+        'var store = {};' +
+        'var fake = {' +
+        'getItem: function(k){return Object.prototype.hasOwnProperty.call(store,k)?String(store[k]):null;},' +
+        'setItem: function(k,v){store[k]=String(v);},' +
+        'removeItem: function(k){delete store[k];},' +
+        'clear: function(){store={};},' +
+        'key: function(i){var ks=Object.keys(store);return i<ks.length?ks[i]:null;}' +
+        '};' +
+        'try{Object.defineProperty(fake,"length",{get:function(){return Object.keys(store).length;}});}catch(e){}' +
+        'try{Object.defineProperty(window,"localStorage",{configurable:true,value:fake});}catch(e){try{window.localStorage=fake;}catch(e2){}}' +
+        'try{Object.defineProperty(window,"sessionStorage",{configurable:true,value:fake});}catch(e){try{window.sessionStorage=fake;}catch(e2){}}' +
+        '})();<\/script>';
+
+      if (/<head[^>]*>/i.test(html)) {
+        html = html.replace(/<head[^>]*>/i, function (m) { return m + polyfill; });
+      } else if (/<html[^>]*>/i.test(html)) {
+        html = html.replace(/<html[^>]*>/i, function (m) { return m + polyfill; });
+      } else {
+        html = polyfill + html;
+      }
+
+      document.getElementById("shared-frame").srcdoc = html;
     })();
   </script>
 </body>

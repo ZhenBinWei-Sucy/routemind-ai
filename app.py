@@ -400,6 +400,24 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_shipments_continent ON shipments(destination_continent)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_shipments_status ON shipments(status)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id, updated_at DESC)")
+    
+    # ── App Builder 表（提前建好，供预置 Key 使用） ──
+    c.execute("""CREATE TABLE IF NOT EXISTS builder_projects (
+        id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS builder_versions (
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+        instruction TEXT, code TEXT NOT NULL, summary TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (project_id) REFERENCES builder_projects(id) ON DELETE CASCADE)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS builder_shares (
+        id TEXT PRIMARY KEY, project_id TEXT, title TEXT,
+        code TEXT NOT NULL, views INTEGER DEFAULT 0, created_at TEXT NOT NULL)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS builder_settings (
+        user_id INTEGER PRIMARY KEY, provider TEXT, base_url TEXT,
+        api_key TEXT, model TEXT)""")
+    
     conn.commit()
 
     count = c.execute("SELECT COUNT(*) FROM shipments").fetchone()[0]
@@ -419,6 +437,37 @@ def init_db():
             ("admin", "admin@routemind.local",
              generate_password_hash("Admin123!"), 1, 1, utc_now().isoformat()))
         conn.commit()
+
+    # ── 预置 admin 的默认 LLM Key（评审期间免配） ──
+    default_llm_key = os.environ.get("DEFAULT_LLM_KEY", "").strip()
+    if default_llm_key:
+        admin_row = c.execute("SELECT id FROM users WHERE username='admin'").fetchone()
+        if admin_row:
+            provider = os.environ.get("DEFAULT_LLM_PROVIDER", "gemini")
+            base_url = os.environ.get(
+                "DEFAULT_LLM_BASE_URL",
+                "https://generativelanguage.googleapis.com/v1beta/openai")
+            model = os.environ.get("DEFAULT_LLM_MODEL", "gemini-3.5-flash-lite")
+
+            exists = c.execute(
+                "SELECT user_id FROM builder_settings WHERE user_id=?",
+                (admin_row["id"],)).fetchone()
+
+            if not exists:
+                c.execute(
+                    "INSERT INTO builder_settings (user_id, provider, base_url, api_key, model) "
+                    "VALUES (?,?,?,?,?)",
+                    (admin_row["id"], provider, base_url, default_llm_key, model))
+                logger.info("[init_db] seeded default LLM key for admin")
+            else:
+                # ★ 关键修复：不管旧 key 是什么，强制覆盖为环境变量里的值
+                c.execute(
+                    "UPDATE builder_settings SET provider=?, base_url=?, api_key=?, model=? "
+                    "WHERE user_id=?",
+                    (provider, base_url, default_llm_key, model, admin_row["id"]))
+                logger.info("[init_db] synced admin LLM key from env (forced)")
+            conn.commit()
+
     conn.close()
     load_all_to_cache()
 
@@ -1613,43 +1662,53 @@ import requests as _http
 
 BUILDER_SYSTEM_PROMPT = """你是前端工程师。根据用户需求生成完整的单文件 HTML 应用。
 
-规则：
-1. 只输出一个 ```html 代码块，无其他文字
-2. CSS/JS 全部内联
-3. 界面语言跟随用户需求
-4. 数据用 localStorage 时，必须用 try/catch 包住（iframe 沙箱可能禁止）
-5. 功能真实可交互，不要占位符
-6. 所有 onclick/onkeydown 引用的函数必须先用 function 声明
-7. 不引用外部资源，除非 CDN 加载 Chart.js / ECharts / 字体
+【硬性规则 — 违反任意一条即为失败】
+1. 只输出一个 ```html 代码块，代码块前后不要任何文字、解释、markdown 标记
+2. 输出必须是完整可运行的 HTML（含 <!DOCTYPE html>、<html>、<head>、<body>）
+3. CSS/JS 全部内联，不引用外部 JS（除非 CDN 加载 Chart.js/ECharts）
+4. 界面语言跟随用户需求
+5. 所有 onclick/onkeydown 引用的函数必须先用 function 声明
 
-【RouteMind 物流数据接口 — 同源、无需鉴权、iframe 可直接调用】
-当用户需求涉及"物流""订单""数据面板""订单追踪"时，必须调用真实接口而不是造假数据：
+【数据持久化 — 极其重要】
+6. 用户数据必须用 localStorage 保存
+7. localStorage 必须用 try/catch 包住
+8. 初始化先 load，操作后立刻 save
 
-1. 获取聚合统计（总量、状态分布、承运商、洲际）：
-   fetch('/api/public/dashboard').then(r=>r.json()).then(d=>{ /* ... */ });
-   返回：{ total, status_distribution:{Delivered,InTransit,Exception},
-           carriers:[{name,count}], continents:[{name,count}] }
+【⚠️ 修改模式 — 如果你是回应修改请求】
+【当前代码是基准，你的任务是修改它，不是重新生成】
+【必须遵守以下 8 条，否则视为失败】
 
-2. 分页获取脱敏订单列表（支持筛选）：
-   fetch('/api/public/shipments?page=1&per_page=20&carrier=&country=&status=')
-   返回：{ rows:[{shipment_id,carrier,destination,destination_country,
-                destination_continent,status,priority,ship_date,
-                expected_delivery_date,actual_delivery_date,
-                delay_reason,shipping_cost}],
-           total, page, per_page, pages }
+M1. 输出必须是完整新版本 HTML（用户只能看完整文件）
+M2. 必须基于当前代码的 DOM 结构、CSS 类名、JS 函数名修改
+M3. 不能返回原代码 —— 用户能明显看到代码不同
+M4. 原有所有功能必须完整保留（增删改查、计分、重开、持久化都不能丢）
+M5. 用户要求的功能必须真实实现，不是注释或占位符
+M6. 涉及数据的状态（棋盘、分数、任务列表等）必须同步更新
+M7. 修改完必须自检：
+    ✅ 用户要求的新功能真的实现了吗？
+    ✅ 原有功能都还在吗？
+    ✅ 代码能跑吗？
 
-3. 获取筛选下拉选项：
-   fetch('/api/public/filters').then(r=>r.json());
-   返回：{ carriers:[], countries:[], statuses:[] }
+【修改示例 — 用户说"增加撤销按钮"】
+❌ 错误：返回原代码（不知道怎么加）
+✅ 正确：
+  1. 在工具栏 HTML 加 <button onclick="undo()">撤销</button>
+  2. 在 JS 加状态栈 let history = []
+  3. 每次 move 前 pushHistory()
+  4. 实现 undo() { if (history.length) { restore(history.pop()) } }
+  5. 完成后检查：撤销按钮在吗？点击真的能恢复吗？
 
-调用要点：
-- 直接用相对路径 fetch('/api/public/xxx')，不要加域名
-- 需要在 iframe 里运行，用 async/await 或 .then
-- 数据量大，分页展示，不要一次拉全部
-- 加载失败时显示友好错误提示
-- 图表用 CDN 加载 Chart.js：<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+【修改示例 — 用户说"改蓝绿色"】
+❌ 错误：返回原代码（不确定色值）
+✅ 正确：把 body background 从 #faf8ef 改成 #0f766e，
+   把 cell 背景改成蓝绿系 #14b8a6 / #0d9488
 
-修改请求时，基于现有代码输出完整新版本，不要省略。"""
+【RouteMind 物流数据接口 — 同源、无需鉴权】
+涉及"物流""订单""数据面板"时，调用真实接口：
+- fetch('/api/public/dashboard') → {total, status_distribution, carriers, continents}
+- fetch('/api/public/shipments?page=1&per_page=20') → {rows, total, page, pages}
+- fetch('/api/public/filters') → {carriers, countries, statuses}
+"""
 
 
 def _init_builder_tables():
@@ -1705,9 +1764,8 @@ def builder_list_versions(pid):
     if not own:
         conn.close()
         return jsonify({"error": "not found"}), 404
-    # ★ 不返回完整 code，节省带宽、防意外泄漏
     rows = conn.execute(
-        "SELECT id, instruction, summary, created_at FROM builder_versions "
+        "SELECT id, instruction, summary, code, created_at FROM builder_versions "
         "WHERE project_id=? ORDER BY created_at DESC", (pid,)).fetchall()
     conn.close()
     return jsonify([dict(r) for r in rows])
@@ -2192,162 +2250,213 @@ def builder_generate():
                      (current_user.id,)).fetchone()
     conn.close()
 
-    # 无 Key → 模板兜底
-    if not s or not (s["api_key"] or "").strip():
-        from builder_templates import match_template
-        code, _name = match_template(instruction)
-        if code:
+    has_key = bool(s and (s["api_key"] or "").strip())
+
+    from builder_templates import match_template, validate_modification
+
+
+    def sse(obj):
+        return b"data: " + json.dumps(obj, ensure_ascii=False).encode("utf-8") + b"\n\n"
+
+    # ══════════════════════════════════════════════════════════
+    # 场景 A：首次生成
+    # ══════════════════════════════════════════════════════════
+    if not current_code:
+        tpl_code, tpl_name = match_template(instruction)
+        if tpl_code:
+            logger.info(f"[generate] first-gen template: {tpl_name}")
+
             def tpl_stream():
-                payload = {"choices": [{"delta": {"content": "```html\n" + code + "\n```"}}]}
+                payload = {"choices": [{"delta": {
+                    "content": "```html\n" + tpl_code + "\n```"
+                }}]}
                 yield b"data: " + json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n\n"
                 yield b"data: [DONE]\n\n"
             return Response(
                 tpl_stream(),
                 mimetype="text/event-stream",
-                headers={"Cache-Control": "no-cache",
-                         "X-Accel-Buffering": "no",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                          "Connection": "close"},
             )
+        if not has_key:
+            return jsonify({
+                "error": "未匹配到模板且未配置 API Key。可试：2048 / 待办 / 计算器 / 番茄钟 / 记账本 / 贪吃蛇 / 天气 / 物流面板"
+            }), 400
+        # 未匹配模板但配置了 Key → 走 LLM 生成
+        # 落到下面统一 LLM 分支
+
+    # ══════════════════════════════════════════════════════════
+    # 场景 B：修改请求必须走 LLM
+    # ══════════════════════════════════════════════════════════
+    if current_code and not has_key:
         return jsonify({
-            "error": "未配置 API Key。可先试：2048、待办、计算器、番茄钟、记账本、贪吃蛇、天气"
+            "error": "当前未配置模型 API Key，无法执行代码修改。"
+                     "请在右上角『设置』中配置模型后再试。"
         }), 400
 
-    base_url = (s["base_url"] or "").strip().rstrip("/")
+    base_url = (s["base_url"] or "").strip().rstrip("/") if s else ""
     if not base_url:
         return jsonify({"error": "Base URL 未配置"}), 400
-    if base_url.endswith("/chat/completions"):
-        endpoint = base_url
-    else:
-        endpoint = base_url + "/chat/completions"
+    endpoint = (base_url if base_url.endswith("/chat/completions")
+                else base_url + "/chat/completions")
 
-    api_key = (s["api_key"] or "").strip()
-    model = (s["model"] or "").strip()
+    api_key = (s["api_key"] or "").strip() if s else ""
+    model = (s["model"] or "").strip() if s else ""
     if not api_key or not model:
         return jsonify({"error": "API Key 或模型未配置"}), 400
 
-    MAX_CODE_LEN = 40000
+    MAX_CODE_LEN = 80000
     if current_code and len(current_code) > MAX_CODE_LEN:
         half = MAX_CODE_LEN // 2
-        current_code = (
-            current_code[:half]
-            + "\n<!-- ...middle truncated... -->\n"
-            + current_code[-half:]
+        current_code = (current_code[:half]
+                        + "\n<!-- ...middle truncated... -->\n"
+                        + current_code[-half:])
+
+    def build_messages(attempt=1, prev_errors=None):
+        """attempt: 1=首次, 2=重试, 3=分解式重试"""
+        msgs = [{"role": "system", "content": BUILDER_SYSTEM_PROMPT}]
+
+        if current_code:
+            err_hint = ""
+            if prev_errors:
+                err_hint = (
+                    f"⚠️ 上一次修改失败，原因：\n"
+                    + "\n".join(f"- {e}" for e in prev_errors)
+                    + "\n\n这次必须真正修改到位，不能重蹈覆辙。\n\n"
+                )
+
+            if attempt >= 3:
+                # 分解式：先规划再输出
+                content = (
+                    f"{err_hint}"
+                    f"当前代码：\n```html\n{current_code}\n```\n\n"
+                    f"用户要求：{instruction}\n\n"
+                    f"【三步走】\n"
+                    f"第一步：在心里列出需要改的地方（不要输出）\n"
+                    f"  - 用户要求的功能改在哪里？\n"
+                    f"  - 原有功能是否保留？\n"
+                    f"第二步：输出完整的新 HTML 代码\n"
+                    f"第三步：自检（不要输出自检结果，只输出代码）\n\n"
+                    f"只输出一个 ```html 代码块。"
+                )
+            else:
+                content = (
+                    f"{err_hint}"
+                    f"当前代码（基准）：\n```html\n{current_code}\n```\n\n"
+                    f"用户要求修改：{instruction}\n\n"
+                    f"【必须遵守】\n"
+                    f"1. 输出完整的新版本 HTML（从 <!DOCTYPE html> 到 </html>）\n"
+                    f"2. 必须基于当前代码修改，不是重新生成\n"
+                    f"3. 用户要求的功能必须真实实现（不是注释、不是占位符）\n"
+                    f"4. 原有功能完整保留（方向键、计分、最高分、新游戏、持久化等）\n"
+                    f"5. 代码必须有明显变化（用户能看出来）\n"
+                    f"6. 只输出 ```html 代码块，不要任何解释文字"
+                )
+            msgs.append({"role": "user", "content": content})
+        else:
+            msgs.append({"role": "user", "content": instruction})
+        return msgs
+
+    def call_llm(msgs, max_tokens=12000):
+        r = _http.post(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": msgs,
+                "stream": False,
+                "max_tokens": max_tokens,
+                # ✅ OpenAI 兼容端点用 reasoning_effort
+                # ❌ 不要用 thinking_level（那是 Gemini 原生 API 的参数）
+                "reasoning_effort": "medium",
+            },
+            timeout=(15, 180),
         )
+        if r.status_code != 200:
+            raise RuntimeError(f"LLM HTTP {r.status_code}: {r.text[:500]}")
+        data = r.json()
+        content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+        return content or ""
 
-    messages = [{"role": "system", "content": BUILDER_SYSTEM_PROMPT}]
-    if current_code:
-        messages.append({
-            "role": "user",
-            "content": f"当前代码：\n```html\n{current_code}\n```\n\n修改要求：{instruction}",
-        })
-    else:
-        messages.append({"role": "user", "content": instruction})
-
-    def sse(obj):
-        return b"data: " + json.dumps(obj, ensure_ascii=False).encode("utf-8") + b"\n\n"
+    def extract_html(raw):
+        if not raw:
+            return None
+        m = re.search(r"```html\s*([\s\S]*?)(```|$)", raw, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+        if "<!DOCTYPE" in raw or "<html" in raw:
+            start = raw.find("<")
+            if start != -1:
+                return raw[start:].strip()
+        return None
 
     def stream():
-        r = None
-        max_attempts = 3
+        final_html = None
+        last_errors = None
 
-        try:
-            for attempt in range(max_attempts):
-                try:
-                    r = _http.post(
-                        endpoint,
-                        headers={
-                            "Authorization": f"Bearer {api_key}",
-                            "Content-Type": "application/json",
-                            "Accept": "text/event-stream",
-                        },
-                        json={
-                            "model": model,
-                            "messages": messages,
-                            "stream": True,
-                        },
-                        stream=True,
-                        timeout=(10, 120),
-                    )
-                except _http.exceptions.RequestException as e:
-                    last_err = f"{type(e).__name__}: {e}"
-                    logger.warning(f"[retry {attempt+1}/{max_attempts}] network error: {last_err}")
-                    if attempt < max_attempts - 1:
-                        yield sse({"retrying": f"网络错误，3秒后重试 ({attempt+2}/{max_attempts})"})
-                        time.sleep(3)
-                        continue
-                    yield sse({"error": f"网络错误（已重试 {max_attempts} 次）: {last_err}"})
-                    yield b"data: [DONE]\n\n"
-                    return
-
-                if r.status_code == 200:
+        # 三次尝试
+        for attempt in range(1, 4):
+            yield sse({"stage": "attempt", "attempt": attempt})
+            try:
+                raw = call_llm(build_messages(attempt, last_errors))
+            except Exception as e:
+                logger.exception(f"[generate] attempt {attempt} failed: {e}")
+                last_errors = [f"模型调用异常: {e}"]
+                if attempt == 3:
                     break
+                yield sse({"stage": "retry", "reason": str(e)})
+                continue
 
-                try:
-                    err_body = r.text[:400]
-                except Exception:
-                    err_body = ""
+            html = extract_html(raw)
+            if not html:
+                last_errors = ["LLM 未返回有效的 HTML 代码块"]
+                if attempt == 3:
+                    break
+                yield sse({"stage": "retry", "reason": "未返回 HTML"})
+                continue
 
-                if r.status_code in (429, 500, 502, 503, 504) and attempt < max_attempts - 1:
-                    wait = 3 + attempt * 2
-                    logger.warning(
-                        f"[retry {attempt+1}] HTTP {r.status_code}, retry in {wait}s: {err_body[:120]}"
-                    )
-                    yield sse({"retrying": f"服务繁忙，{wait} 秒后重试 ({attempt+2}/{max_attempts})"})
-                    time.sleep(wait)
-                    continue
+            # 首次生成：直接通过
+            if not current_code:
+                final_html = html
+                break
 
-                yield sse({"error": f"LLM HTTP {r.status_code}: {err_body[:250]}"})
-                yield b"data: [DONE]\n\n"
-                return
+            # 修改：验证
+            errors = validate_modification(current_code, html, instruction)
+            if not errors:
+                logger.info(f"[generate] attempt {attempt} passed validation")
+                final_html = html
+                break
 
-            if r is None or r.status_code != 200:
-                yield sse({"error": f"重试 {max_attempts} 次仍失败，请换模型或稍后再试"})
-                yield b"data: [DONE]\n\n"
-                return
+            logger.warning(f"[generate] attempt {attempt} failed validation: {errors}")
+            last_errors = errors
+            yield sse({"stage": "retry", "reason": "；".join(errors)})
 
-            ctype = (r.headers.get("Content-Type") or "").lower()
-            if "text/event-stream" not in ctype:
-                try:
-                    data = r.json()
-                    content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
-                    if content:
-                        yield sse({"choices": [{"delta": {"content": content}}]})
-                    else:
-                        yield sse({"error": f"非流式响应无 content: {str(data)[:200]}"})
-                except Exception as e:
-                    yield sse({"error": f"无法解析非流式响应: {e}"})
-                yield b"data: [DONE]\n\n"
-                return
-
-            for raw_bytes in r.iter_lines(decode_unicode=False, chunk_size=1024):
-                if not raw_bytes:
-                    continue
-                try:
-                    line_str = raw_bytes.decode("utf-8")
-                except UnicodeDecodeError:
-                    line_str = raw_bytes.decode("utf-8", errors="replace")
-
-                if line_str.startswith("data:"):
-                    payload = line_str[5:].lstrip()
-                    if payload == "[DONE]":
-                        yield b"data: [DONE]\n\n"
-                        return
-                    yield raw_bytes + b"\n\n"
-                elif line_str.startswith(("event:", "id:", ":", "retry:")):
-                    continue
-                else:
-                    yield b"data: " + raw_bytes + b"\n\n"
-
-        except Exception as e:
-            logger.exception(f"[builder/generate] stream error: {type(e).__name__}: {e}")
-            yield sse({"error": f"流式异常: {type(e).__name__}: {e}"})
+        # 三次都失败 → 明确报错，让用户重试
+        if not final_html:
+            err_detail = "；".join(last_errors) if last_errors else "未知原因"
+            logger.error(f"[generate] all 3 attempts failed: {err_detail}")
+            yield sse({"error": (
+                f"无法完成此修改（原因：{err_detail}）。\n"
+                "建议：\n"
+                "1. 换个说法重试一次\n"
+                "2. 或点击『新建应用』重新生成\n"
+                "3. 或在设置中切换到 gemini-3.5-flash（能力更强）"
+            )})
             yield b"data: [DONE]\n\n"
-        finally:
-            if r is not None:
-                try:
-                    r.close()
-                except Exception:
-                    pass
+            return
+        
+        # 模拟流式输出
+        wrapped = "```html\n" + final_html + "\n```"
+        chunk_size = 200
+        for i in range(0, len(wrapped), chunk_size):
+            chunk = wrapped[i:i+chunk_size]
+            yield sse({"choices": [{"delta": {"content": chunk}}]})
+            time.sleep(0.003)
+
+        yield b"data: [DONE]\n\n"
 
     return Response(
         stream(),
