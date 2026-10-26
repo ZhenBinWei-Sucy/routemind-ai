@@ -1667,7 +1667,7 @@ BUILDER_SYSTEM_PROMPT = """你是前端工程师。根据用户需求生成完�
 2. 输出必须是完整可运行的 HTML（含 <!DOCTYPE html>、<html>、<head>、<body>）
 3. CSS/JS 全部内联，不引用外部 JS（除非 CDN 加载 Chart.js/ECharts）
 4. 界面语言跟随用户需求
-5. 所有 onclick/onkeydown 引用的函数必须先用 function 声明（function xxx() {} 而不是 const xxx = () => {}）
+5. 所有 onclick/onkeydown 引用的函数必须先用 function 声明
 6. 功能必须真实可交互，不能有占位符、TODO、注释代替实现
 7. 应用要能独立运行，不依赖父页面
 
@@ -1687,42 +1687,78 @@ function saveData(v) {
   try { localStorage.setItem('myapp-key', JSON.stringify(v)); }
   catch (e) {}
 }
+═══════════════════════════════════════════════════════
+【待办清单 — 必须全部实现以下 8 项，缺一项即为失败】
+═══════════════════════════════════════════════════════
+当用户要"待办/清单/todo/任务管理"时，必须包含：
+✅ 1. 添加任务：输入框 + 添加按钮 + Enter 也能添加
+✅ 2. 任务改名：每行有"编辑"按钮，点击变成输入框，回车/保存按钮确认
+✅ 3. 勾选完成：复选框，完成的文字变灰 + 删除线
+✅ 4. 删除任务：每行有"删除"按钮
+✅ 5. 三个筛选入口：「全部」「未完成」「已完成」三个按钮，点击切换过滤
+✅ 6. 空任务不能添加：input.trim() 为空时弹提示（toast/alert），不能静默失败
+✅ 7. localStorage 持久化：任务列表、每项的 text/done 状态、当前筛选状态都要存
+✅ 8. 刷新后完整恢复：任务内容、完成状态、改名后的名称都要回来
 
-【⚠️ 修改模式 — 如果你是回应修改请求】
-【当前代码是基准，你的任务是修改它，不是重新生成】
-【必须遵守以下 8 条，否则视为失败】
+参考结构（必须用类似的 state 结构，但代码可自由发挥）：
 
-M1. 输出必须是完整新版本 HTML（用户只能看完整文件）
-M2. 必须基于当前代码的 DOM 结构、CSS 类名、JS 函数名修改
-M3. 不能返回原代码 —— 用户能明显看到代码不同
-M4. 原有所有功能必须完整保留（增删改查、计分、重开、持久化都不能丢）
-M5. 用户要求的功能必须真实实现，不是注释或占位符
-M6. 涉及数据的状态（棋盘、分数、任务列表等）必须同步更新
-M7. 修改完必须自检：
-    ✅ 用户要求的新功能真的实现了吗？
-    ✅ 原有功能都还在吗？
-    ✅ 代码能跑吗？
+state: { todos: [{id, text, done}], filter: 'all'|'active'|'done' }
 
-【修改示例 — 用户说"增加撤销按钮"】
-❌ 错误：返回原代码（不知道怎么加）
-✅ 正确：
-  1. 在工具栏 HTML 加 <button onclick="undo()">撤销</button>
-  2. 在 JS 加状态栈 let history = []
-  3. 每次 move 前 pushHistory()
-  4. 实现 undo() { if (history.length) { restore(history.pop()) } }
-  5. 完成后检查：撤销按钮在吗？点击真的能恢复吗？
+修改任何 state 后立刻 saveData()
 
-【修改示例 — 用户说"改蓝绿色"】
-❌ 错误：返回原代码（不确定色值）
-✅ 正确：把 body background 从 #faf8ef 改成 #0f766e，
-   把 cell 背景改成蓝绿系 #14b8a6 / #0d9488
+初始化时先 loadData() 恢复 state，再 render()
+
+═══════════════════════════════════════════════════════
+【2048 — 必须全部实现以下 6 项】
+═══════════════════════════════════════════════════════
+✅ 1. 4×4 棋盘 + 随机生成 2 或 4
+✅ 2. 方向键 + WASD + 触屏滑动 控制
+✅ 3. 数字合并计分
+✅ 4. 新游戏按钮
+✅ 5. 最高分用 localStorage 保存（key: '2048-best'）
+✅ 6. 当前棋盘和分数用 localStorage 保存（key: '2048-state'），刷新后恢复
+
+═══════════════════════════════════════════════════════
+【贪吃蛇 — 必须全部实现】
+═══════════════════════════════════════════════════════
+✅ 1. 方向键 + WASD 控制
+✅ 2. 得分显示 + 最高分 localStorage 保存
+✅ 3. 食物随机生成，吃到加分，撞墙/撞自己游戏结束
+✅ 4. 暂停按钮（可选但推荐）
+
+═══════════════════════════════════════════════════════
+【计算器 / 番茄钟 / 记账本 / 天气】
+═══════════════════════════════════════════════════════
+
+计算器：四则运算 + 清除 + 错误处理 + 状态 localStorage 保存
+
+番茄钟：25 分钟工作 + 5 分钟休息循环 + 开始/暂停/重置 + 可修改时间 + 状态 localStorage 保存
+
+记账本：收入/支出 + 分类统计 + 添加/删除 + localStorage 保存
+
+天气：城市选择 + 温度/湿度/风速 + 选中城市 localStorage 保存
+
+【颜色/主题 — 由你理解并实现】
+用户说"紫色"、"金黄色"、"BT21 的颜色"、"赛博朋克风"等，
+你必须自己根据对这些概念的理解选择具体的 CSS 色值实现。
+不要询问，不要返回原代码，直接用你理解的色值改。
+
+【修改请求 — 如果你是回应修改】
+M1. 输出必须是完整新版本 HTML
+M2. 必须基于当前代码修改，不是重新生成
+M3. 不能返回原代码 — 用户能明显看到代码不同
+M4. 原有所有功能必须完整保留
+M5. 用户要求的功能必须真实实现
+M6. 修改完自检：新功能在吗？旧功能在吗？能跑吗？
 
 【RouteMind 物流数据接口 — 同源、无需鉴权】
-涉及"物流""订单""数据面板"时，调用真实接口：
-- fetch('/api/public/dashboard') → {total, status_distribution, carriers, continents}
-- fetch('/api/public/shipments?page=1&per_page=20') → {rows, total, page, pages}
-- fetch('/api/public/filters') → {carriers, countries, statuses}
-"""
+涉及"物流""订单""数据面板"时，调用真实接口（相对路径）：
+
+fetch('/api/public/dashboard') → {total, status_distribution, carriers, continents}
+
+fetch('/api/public/shipments?page=1&per_page=20') → {rows, total, page, pages}
+
+fetch('/api/public/filters') → {carriers, countries, statuses}"""
 
 
 def _init_builder_tables():
@@ -2404,7 +2440,6 @@ def builder_generate():
     def stream():
         final_html = None
         last_errors = None
-        used_fallback = False
 
         for attempt in range(1, 4):
             yield sse({"stage": "attempt", "attempt": attempt})
@@ -2426,46 +2461,55 @@ def builder_generate():
                 yield sse({"stage": "retry", "reason": "未返回完整 HTML"})
                 continue
 
-            # 首次生成：通过
+            # ══════════════════════════════════════════════════
+            # 首次生成：也做验证（Isabella 逐条验收标准）
+            # ══════════════════════════════════════════════════
             if not current_code:
-                final_html = html
-                break
+                from builder_templates import validate_first_generation
+                errors = validate_first_generation(instruction, html)
+                if not errors:
+                    logger.info(f"[generate] first-gen attempt {attempt} passed")
+                    final_html = html
+                    break
 
+                logger.warning(f"[generate] first-gen attempt {attempt} failed: {errors}")
+                last_errors = errors
+                yield sse({"stage": "retry", "reason": "；".join(errors)})
+                continue
+
+            # ══════════════════════════════════════════════════
             # 修改：验证
+            # ══════════════════════════════════════════════════
             errors = validate_modification(current_code, html, instruction)
             if not errors:
-                logger.info(f"[generate] attempt {attempt} passed validation")
+                logger.info(f"[generate] modify attempt {attempt} passed")
                 final_html = html
                 break
 
-            logger.warning(f"[generate] attempt {attempt} failed validation: {errors}")
+            logger.warning(f"[generate] modify attempt {attempt} failed: {errors}")
             last_errors = errors
             yield sse({"stage": "retry", "reason": "；".join(errors)})
 
         # ══════════════════════════════════════════════════════
-        # LLM 三次都失败 → 首次生成场景可以尝试模板兜底
+        # LLM 三次都失败 → 首次生成可以模板兜底
         # ══════════════════════════════════════════════════════
         if not final_html:
             if not current_code:
-                # 首次生成：尝试模板兜底
                 tpl_code, tpl_name = match_template(instruction)
                 if tpl_code:
-                    logger.warning(f"[generate] LLM failed, fallback to template: {tpl_name}")
+                    logger.warning(
+                        f"[generate] LLM failed 3x, fallback to: {tpl_name}")
                     yield sse({"stage": "fallback",
                                "reason": f"AI 生成失败，已使用内置 {tpl_name} 模板"})
                     final_html = tpl_code
-                    used_fallback = True
                 else:
                     yield sse({"error": (
                         f"AI 生成失败（原因：{'；'.join(last_errors or ['未知'])}）。\n"
-                        "建议：\n"
-                        "1. 换个说法重试\n"
-                        "2. 或在设置中切换到 gemini-3.5-flash（能力更强）"
+                        "建议：换个说法重试，或在设置中切换到 gemini-3.5-flash（能力更强）"
                     )})
                     yield b"data: [DONE]\n\n"
                     return
             else:
-                # 修改场景：不给模板兜底（模板不是修改的结果）
                 yield sse({"error": (
                     f"无法完成此修改（原因：{'；'.join(last_errors or ['未知'])}）。\n"
                     "建议：\n"
@@ -2476,9 +2520,7 @@ def builder_generate():
                 yield b"data: [DONE]\n\n"
                 return
 
-        # ══════════════════════════════════════════════════════
         # 模拟流式输出
-        # ══════════════════════════════════════════════════════
         wrapped = "```html\n" + final_html + "\n```"
         chunk_size = 200
         for i in range(0, len(wrapped), chunk_size):
@@ -2487,7 +2529,7 @@ def builder_generate():
             time.sleep(0.003)
 
         yield b"data: [DONE]\n\n"
-
+        
     return Response(
         stream(),
         mimetype="text/event-stream",
