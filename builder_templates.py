@@ -684,3 +684,86 @@ def validate_modification(old_code: str, new_code: str, instruction: str):
                 errors.append(f"未实现「{intent}」功能")
 
     return errors
+
+def validate_first_generation(instruction: str, html: str):
+    """首次生成的质量验证。针对具体应用类型检查关键功能是否齐全。
+    返回错误列表（空 = 通过）。"""
+    errors = []
+    if not html:
+        return ["生成的代码为空"]
+
+    html_lower = html.lower()
+    instr_lower = (instruction or "").lower()
+
+    # ══════════════════════════════════════════════════════
+    # 待办清单 — Isabella 逐条验收
+    # ══════════════════════════════════════════════════════
+    is_todo = ("待办" in instruction or "todo" in instr_lower or
+               "清单" in instruction or "任务" in instruction)
+    if is_todo:
+        # 1. 编辑/改名
+        if not any(k in html_lower for k in
+                   ["edit", "rename", "编辑", "改名", "saveedit", "startedit"]):
+            errors.append("待办缺少编辑/改名功能")
+
+        # 2. 三筛选（全部/未完成/已完成 至少都出现）
+        has_all = ("全部" in html or ">all<" in html_lower or
+                   "filter-all" in html_lower or "'all'" in html_lower or '"all"' in html_lower)
+        has_active = ("未完成" in html or "active" in html_lower or
+                      "filter-active" in html_lower or "'active'" in html_lower or '"active"' in html_lower)
+        has_done = ("已完成" in html or "filter-done" in html_lower or
+                    "completed" in html_lower or "'done'" in html_lower or '"done"' in html_lower)
+        if not (has_all and has_active and has_done):
+            missing = []
+            if not has_all: missing.append("全部")
+            if not has_active: missing.append("未完成")
+            if not has_done: missing.append("已完成")
+            errors.append(f"待办缺少筛选入口（缺：{', '.join(missing)}）")
+
+        # 3. 空任务校验
+        if "trim" not in html_lower:
+            errors.append("待办缺少空任务校验（未使用 trim()）")
+
+        # 4. localStorage 持久化
+        if "localstorage" not in html_lower:
+            errors.append("待办缺少 localStorage 持久化")
+
+        # 5. saveData 函数（确保操作后有保存）
+        if not any(k in html_lower for k in
+                   ["savedata", "save()", "saveitems", "store.save"]):
+            errors.append("待办缺少 saveData 函数（操作后未持久化）")
+
+    # ══════════════════════════════════════════════════════
+    # 2048
+    # ══════════════════════════════════════════════════════
+    if "2048" in instruction:
+        if "localstorage" not in html_lower:
+            errors.append("2048 缺少 localStorage 持久化")
+        # 核心合并逻辑
+        if not any(k in html_lower for k in
+                   ["slide", "merge", "arr[i]", "row[i]"]):
+            errors.append("2048 缺少合并逻辑")
+
+    # ══════════════════════════════════════════════════════
+    # 贪吃蛇
+    # ══════════════════════════════════════════════════════
+    if "贪吃蛇" in instruction or "snake" in instr_lower:
+        if "localstorage" not in html_lower:
+            errors.append("贪吃蛇缺少 localStorage 持久化（最高分）")
+
+    # ══════════════════════════════════════════════════════
+    # 计算器
+    # ══════════════════════════════════════════════════════
+    if "计算器" in instruction or "calc" in instr_lower:
+        # 四则运算
+        if not all(op in html for op in ["+", "-", "*", "/"]):
+            errors.append("计算器缺少四则运算")
+
+    # ══════════════════════════════════════════════════════
+    # 番茄钟
+    # ══════════════════════════════════════════════════════
+    if "番茄" in instruction or "pomodoro" in instr_lower:
+        if "localstorage" not in html_lower:
+            errors.append("番茄钟缺少 localStorage 持久化")
+
+    return errors
