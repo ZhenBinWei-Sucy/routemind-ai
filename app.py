@@ -417,6 +417,16 @@ def init_db():
     c.execute("""CREATE TABLE IF NOT EXISTS builder_settings (
         user_id INTEGER PRIMARY KEY, provider TEXT, base_url TEXT,
         api_key TEXT, model TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS project_chats (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id TEXT NOT NULL,
+        user_id INTEGER NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+    )""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_project_chats ON project_chats(project_id, id)")
     
     conn.commit()
 
@@ -865,6 +875,44 @@ def create_share(pid):
     conn.close()
     return jsonify({"token": token, "url": f"/share/{token}"})
 
+@app.route("/api/projects/<pid>/chats", methods=["GET"])
+@login_required
+def list_project_chats(pid):
+    r = _owned_project(pid)
+    if not r:
+        return jsonify({"error": "not found"}), 404
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT role, content, created_at FROM project_chats "
+        "WHERE project_id=? AND user_id=? ORDER BY id ASC",
+        (pid, current_user.id)).fetchall()
+    conn.close()
+    return jsonify([dict(x) for x in rows])
+
+
+@app.route("/api/projects/<pid>/chats", methods=["POST"])
+@login_required
+def add_project_chat(pid):
+    r = _owned_project(pid)
+    if not r:
+        return jsonify({"error": "not found"}), 404
+    d = request.get_json() or {}
+    role = d.get("role")
+    content = (d.get("content") or "").strip()
+    if role not in ("user", "assistant"):
+        return jsonify({"error": "invalid role"}), 400
+    if not content:
+        return jsonify({"error": "empty content"}), 400
+    if len(content) > 4000:
+        content = content[:4000]
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO project_chats (project_id, user_id, role, content, created_at) "
+        "VALUES (?,?,?,?,?)",
+        (pid, current_user.id, role, content, utc_now().isoformat()))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
 
 @app.route("/api/projects/<pid>/versions", methods=["GET"])
 @login_required
@@ -918,12 +966,160 @@ def get_shared(token):
         "readonly": True,
     })
 
+ANALYZE_SYSTEM_PROMPT = """你是物流分析助手。用户用自然语言描述分析需求，你要解析出结构化配置。
+
+【能力边界 — 极其重要】
+如果用户的需求超出以下范围，返回 {"unsupported": true, "reason": "..."}
+支持范围：
+- 延误率/延误天数分析
+- 承运商/国家/洲/线路对比
+- 成本/收入/OTIF/ETA 分析
+- 在途风险/异常订单
+- 时间范围筛选（"最近N天"）
+
+不支持：
+- 数据里没有的字段（节日、天气、运输方式、品类...）
+- 特定事件的时段对比（"排灯节期间"、"去年双11"）
+- 与物流无关的问题（编程、天气、写作...）
+- 因果分析（"为什么延误"→ 只能说相关原因分布）
+
+例：
+输入："分析印度排灯节的延误"
+输出：{"unsupported": true, "reason": "数据中没有节假日标记，无法定位排灯节期间的数据。可改为分析印度的整体延误情况。"}
+
+输入："写个 Python 爬虫"
+输出：{"unsupported": true, "reason": "这是物流分析工作台，只能回答物流数据相关问题。"}
+
+【返回格式 — 必须是纯 JSON，不要任何 markdown 包裹】
+{
+  "title": "简短的分析标题（≤20 字）",
+  "date_range_days": 30,
+  "min_delay_days": null,
+  "max_delay_days": null,
+  "group_by": ["carrier", "country"],
+  "reasoning": "用一句话总结你对用户需求的理解（≤60 字）",
+  "suggested_focus": "建议优先关注的 1-2 个关键指标（≤80 字）"
+}
+
+【字段规则】
+- title：从需求提取，如"近30天延误分析"
+- date_range_days：用户说"最近N天"→ N；"一个月"→30；"一周"→7；未提→30；范围 1-365
+- min_delay_days：用户说"超过N天"→ N；未提→null；范围 0-365
+- max_delay_days：用户说"少于N天"→ N；未提→null；范围 0-365
+- group_by：必须包含 "carrier"/"country"/"continent"/"lane" 中至少一个
+- reasoning：为什么这样解析
+- suggested_focus：值得关注的点
+
+只返回 JSON，不要任何其他文字。"""
 
 @app.route("/api/analyze", methods=["POST"])
 @login_required
 def analyze():
-    text = (request.get_json() or {}).get("prompt", "")
-    return jsonify(parse_request(text))
+    text = (request.get_json() or {}).get("prompt", "").strip()
+    if not text:
+        return jsonify(parse_request(""))
+
+    base_config = parse_request(text)
+
+    conn = get_conn()
+    s = conn.execute("SELECT * FROM builder_settings WHERE user_id=?",
+                     (current_user.id,)).fetchone()
+    conn.close()
+
+    if not s or not (s["api_key"] or "").strip():
+        return jsonify(base_config)
+
+    base_url = (s["base_url"] or "").strip().rstrip("/")
+    if not base_url:
+        return jsonify(base_config)
+    endpoint = (base_url if base_url.endswith("/chat/completions")
+                else base_url + "/chat/completions")
+
+    try:
+        r = _http.post(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {s['api_key'].strip()}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": s["model"],
+                "messages": [
+                    {"role": "system", "content": ANALYZE_SYSTEM_PROMPT},
+                    {"role": "user", "content": text},
+                ],
+                "stream": False,
+                "max_tokens": 500,
+                "reasoning_effort": "minimal",
+            },
+            timeout=(5, 15),
+        )
+        if r.status_code != 200:
+            logger.warning(f"[analyze] LLM {r.status_code}, fallback")
+            return jsonify(base_config)
+
+        data = r.json()
+        content = ((data.get("choices") or [{}])[0]
+                   .get("message", {}).get("content", "")).strip()
+
+        m = re.search(r"\{[\s\S]*\}", content)
+        if not m:
+            logger.warning("[analyze] no JSON, fallback")
+            return jsonify(base_config)
+
+        try:
+            llm_config = json.loads(m.group(0))
+        except Exception:
+            logger.warning("[analyze] invalid JSON, fallback")
+            return jsonify(base_config)
+
+        if not isinstance(llm_config, dict):
+            return jsonify(base_config)
+
+        if llm_config.get("unsupported"):
+            reason = llm_config.get("reason") or "无法分析该需求"
+            if not isinstance(reason, str):
+                reason = "无法分析该需求"
+            return jsonify({"unsupported": True, "reason": reason[:300]})
+
+        merged = dict(base_config)
+
+        t = llm_config.get("title")
+        if isinstance(t, str) and t.strip():
+            merged["title"] = t.strip()[:60]
+
+        days = llm_config.get("date_range_days")
+        if isinstance(days, (int, float)) and 1 <= days <= 365:
+            merged["date_range_days"] = int(days)
+
+        gb = llm_config.get("group_by")
+        if isinstance(gb, list):
+            valid = {"carrier", "country", "continent", "lane"}
+            filtered = [x for x in gb if isinstance(x, str) and x in valid]
+            if filtered:
+                merged["group_by"] = filtered
+
+        for k in ("min_delay_days", "max_delay_days"):
+            v = llm_config.get(k)
+            if v is None:
+                merged[k] = None
+            elif isinstance(v, (int, float)) and 0 <= v <= 365:
+                merged[k] = int(v)
+
+        rs = llm_config.get("reasoning")
+        if isinstance(rs, str) and rs.strip():
+            merged["reasoning"] = rs.strip()[:200]
+
+        sf = llm_config.get("suggested_focus")
+        if isinstance(sf, str) and sf.strip():
+            merged["suggested_focus"] = sf.strip()[:200]
+
+        logger.info(f"[analyze] LLM config ok: title={merged.get('title')}")
+        return jsonify(merged)
+
+    except Exception as e:
+        logger.warning(f"[analyze] error: {type(e).__name__}: {e}")
+        return jsonify(base_config)
 
 
 @app.route("/api/followup", methods=["POST"])
@@ -2084,15 +2280,16 @@ def public_filters():
     })
 
 
-ASSISTANT_SYSTEM_PROMPT = """你是 RouteMind 的物流数据分析助手。用户问题会附带一份当前数据集的结构化快照（JSON），你必须严格基于这份数据回答。
+ASSISTANT_SYSTEM_PROMPT = """你是 RouteMind 的物流数据分析助手。用户问题会附带一份当前数据集的结构化快照（JSON）。
 
 【数据源清单 — 你手里有什么】
-- metrics：全局指标（total_shipments / delay_rate / on_time_rate / otif_rate / avg_delay_days / p90_delay_days / in_transit_count / at_risk_count / revenue / avg_cost_per_shipment 等）
-- carriers[]：每个承运商的 name / delay_rate / otif_rate / avg_cost_per_shipment / shipments
-- countries[]：每个国家的 name / delay_rate / otif_rate / shipments / revenue
-- lanes[]：Top 15 条线路，lane 字符串形如 "China → United States"，含 delay_rate / otif_rate / shipments
-- trend[]：最近每天的总量与延误率（date / delay_rate / total）
-- cities_by_country：delay_rate 最高的 Top 5 国家，各自 Top 3 城市（name / delay_rate / shipments）
+- current_filters：当前筛选状态（date_range_days / carrier / country / continent / min_delay_days）
+- metrics：全局指标（total_shipments / delay_rate / on_time_rate / otif_rate / avg_delay_days / p90_delay_days / in_transit_count / at_risk_count / revenue / avg_cost_per_shipment）
+- top_carriers[]：每个承运商 name / delay_rate / otif_rate / avg_cost_per_shipment / shipments
+- top_countries[]：每个国家 name / delay_rate / otif_rate / shipments / revenue
+- top_lanes[]：Top 10 线路，lane 形如 "China → United States"，含 delay_rate / otif_rate / shipments
+- trend[]：最近每天 date / delay_rate / total
+- cities_by_country：Top 5 国家各自的 Top 3 城市（name / delay_rate / shipments）
 - top_reasons[]：延误原因排行（name / count）
 - cost：成本拆解（line_haul / fuel / accessorial / detention / total）
 - delay_range：当前延误区间筛选状态
@@ -2100,47 +2297,60 @@ ASSISTANT_SYSTEM_PROMPT = """你是 RouteMind 的物流数据分析助手。用�
 【能回答的典型问题】
 - 承运商对比（延误率、OTIF、每单成本、订单量）
 - 国家/地区风险排名
-- 线路表现（"中国到美国哪条最差" → 在 lanes 里找含 China 和 United States 的项）
+- 线路表现（"中国到美国哪条最差" → 在 top_lanes 里找含 China 和 United States 的项）
 - 每日延误趋势（"哪天最差" → 在 trend 里找 delay_rate 最高的日期）
 - 国家内城市明细（"中国哪个城市延误最多" → 查 cities_by_country.China）
 - 延误原因分布
 - 成本构成、每单平均成本
 - 在途风险订单量
-- 优化建议（基于上述数据给针对性建议）
+- 优化建议
 
-【数据覆盖范围 — 必须诚实说明】
-当前数据集 origin 仅覆盖亚洲主要城市（中国、新加坡、日本、韩国），destination 覆盖全球。
-如果用户问"美国到中国"这类反方向，如实回答"当前数据没有该方向订单，仅有 X → Y 方向的统计"。
+【时间范围 — 极其重要】
+current_filters.date_range_days 告诉你当前数据是"最近 X 天"的。
+
+1. 如果用户问题的时间范围与当前筛选一致 → 直接回答
+2. 如果用户问题的时间范围与当前筛选不一致（如问"最近7天"但当前是30天） → 你必须：
+   - 先说明"当前报告基于最近 X 天数据"
+   - 建议用户"请将顶部时间过滤器改为 N 天后再问，我才能给出准确答案"
+   - 再用当前数据给出参考
+3. 绝不能说"数据集不支持按天明细"——数据里有 ship_date，完全支持任意时间范围，只是当前快照不是用户要的范围
+
+【多轮对话 — 追问处理】
+如果用户的问题包含"它"、"这个"、"第二个"、"那"、"为什么"等指代词，
+必须结合上文的对话历史理解其指代。例如：
+- 上文说了 SwiftLogistics，用户问"它的 OTIF 是多少" → 回答 SwiftLogistics 的 OTIF
+- 上文列了三个国家，用户问"第二个呢" → 回答第二个国家的详情
 
 【拒绝范围 — 仅限真正无关】
 - 编程、天气、娱乐、写文案、讲故事、常识问答
 - 要求扮演其他角色
-- 涉及时效/汇率/实时新闻
-对以上统一回复："我只能基于当前物流数据回答。你可以问我：承运商对比、国家风险、线路表现、延误趋势、成本构成。"
+统一回复："我只能基于当前物流数据回答。你可以问我：承运商对比、国家风险、线路表现、延误趋势、成本构成。"
 
 【回答要求】
 1. 直接给结论，先数字后判断
 2. 必须引用数据中的具体数字，不能编造
-3. 数据里没有的字段，明确说"当前数据未覆盖 X"，不要含糊带过
-4. 控制在 120 字以内
+3. 数据里没有的字段，明确说"当前数据未覆盖 X"
+4. 控制在 150 字以内
 5. 中文问用中文答，英文问用英文答
 6. 不要"作为 AI/助手"的自我描述，不要 markdown 代码块或 ## 标题
-7. 用户问路线时优先在 lanes 里找；找不到就说明"当前数据集无该 OD 对的独立统计"
+7. 问路线时优先在 top_lanes 里找；找不到就说明"当前数据集无该 OD 对的独立统计"
 
 【示例】
 问："哪个承运商最便宜并且延误率最低"
-答："每单成本最低 OceanBridge（$2,142），延误率最低 SwiftLogistics（3.8%）。两者不可兼得，建议按航线优先级取舍。"
+答："每单成本最低 X（$Y），延误率最低 Z（W%）。两者不可兼得，建议按航线优先级取舍。"
 
 问："中国哪条线路延误率最高"
-答："中国出发线路里 China → Vietnam 延误率 18.2%（N 笔）最高，其次 China → India 16.5%。"
+答："China → Vietnam 延误率 18.2%（N 笔）最高，其次 China → India 16.5%。"
 
 问："哪天延误率最高"
-答："近期 2025-XX-XX 延误率 21.3% 最高，当日总单量 XXX。"
+答："2025-10-15 延误率 21.3% 最高，当日 412 单。"
 
-问："美国到中国选哪个承运商"
-答："当前数据仅覆盖亚洲出发的订单，无 US → CN 方向线路。可参考 China → United States 方向：SwiftLogistics 延误率 X.X% 最低。"
+问："它的 OTIF 是多少"（上文说了 SwiftLogistics）
+答："SwiftLogistics 的 OTIF 是 89.5%。"
+
+问："最近7天情况"（当前 30 天）
+答："当前报告基于最近 30 天数据。如需最近 7 天的分析，请将顶部时间过滤器改为『最近 7 天』后再问。基于当前 30 天，延误率 12.3%。"
 """
-
 
 @app.route("/api/assistant", methods=["POST"])
 @login_required
@@ -2148,9 +2358,15 @@ def assistant_chat():
     d = request.get_json() or {}
     question = (d.get("question") or "").strip()
     report = d.get("report") or {}
+    history = d.get("history") or []
+
     if not question:
         return jsonify({"error": "question required"}), 400
-    if not report:
+    if len(question) > 2000:
+        question = question[:2000]
+    if not isinstance(history, list):
+        history = []
+    if not report or not report.get("metrics"):
         return jsonify({"error": "no report data", "fallback": True}), 200
 
     metrics = report.get("metrics") or {}
@@ -2162,71 +2378,54 @@ def assistant_chat():
     cost = report.get("cost_breakdown") or {}
     ranges = report.get("range_stats") or {}
     map_cities = report.get("map_cities") or []
+    filters = report.get("filters") or {}
 
-    # 承运商：完整字段（含 avg_cost_per_shipment，之前缺这个导致"未提供成本"）
-    carrier_list = [
-        {
-            "name": c.get("name"),
-            "delay_rate": c.get("delay_rate"),
-            "otif_rate": c.get("otif_rate"),
-            "avg_cost_per_shipment": c.get("avg_cost_per_shipment"),
-            "shipments": c.get("total_shipments"),
-        }
-        for c in carriers
-    ]
+    # 城市聚合：Top 5 国家各 Top 3 城市
+    cities_by_country = {}
+    for country in countries[:5]:
+        cname = country.get("name")
+        if not cname:
+            continue
+        city_list = [
+            c for c in map_cities
+            if c.get("country") == cname and c.get("delay_rate") is not None
+        ]
+        city_list.sort(key=lambda x: x.get("delay_rate") or 0, reverse=True)
+        cities_by_country[cname] = [
+            {"name": c.get("name"),
+             "delay_rate": c.get("delay_rate"),
+             "shipments": c.get("total_shipments")}
+            for c in city_list[:3]
+        ]
 
-    # 国家：完整字段
-    country_list = [
-        {
-            "name": c.get("name"),
-            "delay_rate": c.get("delay_rate"),
-            "otif_rate": c.get("otif_rate"),
-            "shipments": c.get("total_shipments"),
-            "revenue": c.get("revenue"),
-        }
-        for c in countries
-    ]
-
-    # 线路：Top 15
-    lane_list = [
-        {
-            "lane": l.get("lane"),
-            "delay_rate": l.get("delay_rate"),
-            "otif_rate": l.get("otif_rate"),
-            "shipments": l.get("total_shipments"),
-        }
-        for l in lanes[:15]
-    ]
-
-    # 趋势：只保留有单量的日期，压缩 token
-    trend_list = [
-        {"date": p.get("date"), "delay_rate": p.get("delay_rate"),
+    # trend 精简
+    trend_clean = [
+        {"date": p.get("date"),
+         "delay_rate": p.get("delay_rate"),
          "total": p.get("total")}
         for p in trend if (p.get("total") or 0) > 0
     ]
+    if len(trend_clean) > 30:
+        trend_clean = trend_clean[-30:]
 
-    # 城市聚合：每个国家 Top 3 城市（按延误率排序）
-    cities_by_country = {}
-    if map_cities:
-        for country in country_list[:5]:
-            cname = country.get("name")
-            if not cname:
-                continue
-            country_cities = [
-                c for c in map_cities
-                if c.get("country") == cname and c.get("delay_rate") is not None
-            ]
-            country_cities.sort(
-                key=lambda x: x.get("delay_rate") or 0, reverse=True
-            )
-            cities_by_country[cname] = [
-                {"name": c.get("name"),
-                 "delay_rate": c.get("delay_rate"),
-                 "shipments": c.get("total_shipments")}
-                for c in country_cities[:3]
-            ]
+    # min_delay_days 规范化为 int 或 None
+    raw_min = filters.get("min_delay_days")
+    if raw_min in (None, ""):
+        min_delay_val = None
+    else:
+        try:
+            min_delay_val = int(raw_min)
+        except (ValueError, TypeError):
+            min_delay_val = None
 
     context = {
+        "current_filters": {
+            "date_range_days": filters.get("date_range_days", 30),
+            "carrier": filters.get("carrier") or "",
+            "country": filters.get("country") or "",
+            "continent": filters.get("continent") or "",
+            "min_delay_days": min_delay_val,
+        },
         "metrics": {k: metrics.get(k) for k in [
             "total_shipments", "delivered_count", "delayed_count",
             "in_transit_count", "exception_count", "delay_rate",
@@ -2234,13 +2433,35 @@ def assistant_chat():
             "avg_delay_days", "p90_delay_days", "at_risk_count",
             "revenue", "avg_cost_per_shipment",
         ]},
-        "carriers": carrier_list,
-        "countries": country_list,
-        "lanes": lane_list,
-        "trend": trend_list,
+        "top_carriers": [
+            {"name": c.get("name"),
+             "delay_rate": c.get("delay_rate"),
+             "otif_rate": c.get("otif_rate"),
+             "avg_cost_per_shipment": c.get("avg_cost_per_shipment"),
+             "shipments": c.get("total_shipments")}
+            for c in carriers[:8]
+        ],
+        "top_countries": [
+            {"name": c.get("name"),
+             "delay_rate": c.get("delay_rate"),
+             "otif_rate": c.get("otif_rate"),
+             "shipments": c.get("total_shipments"),
+             "revenue": c.get("revenue")}
+            for c in countries[:8]
+        ],
+        "top_lanes": [
+            {"lane": l.get("lane"),
+             "delay_rate": l.get("delay_rate"),
+             "otif_rate": l.get("otif_rate"),
+             "shipments": l.get("total_shipments")}
+            for l in lanes[:10]
+        ],
+        "trend": trend_clean,
         "cities_by_country": cities_by_country,
-        "top_reasons": [{"name": r.get("name"), "count": r.get("count")}
-                        for r in reasons[:8]],
+        "top_reasons": [
+            {"name": r.get("name"), "count": r.get("count")}
+            for r in reasons[:8]
+        ],
         "cost": cost,
         "delay_range": ranges,
     }
@@ -2256,26 +2477,49 @@ def assistant_chat():
     base_url = (s["base_url"] or "").strip().rstrip("/")
     if not base_url:
         return jsonify({"error": "Base URL 未配置", "fallback": True}), 200
-    endpoint = base_url if base_url.endswith("/chat/completions") \
-                       else base_url + "/chat/completions"
+    endpoint = (base_url if base_url.endswith("/chat/completions")
+                else base_url + "/chat/completions")
 
-    messages = [
-        {"role": "system", "content": ASSISTANT_SYSTEM_PROMPT},
-        {"role": "user", "content":
+    # 拼 messages：system + 历史 + 当前问题（带 context）
+    messages = [{"role": "system", "content": ASSISTANT_SYSTEM_PROMPT}]
+    for h in history[-6:]:
+        if not isinstance(h, dict):
+            continue
+        h_role = h.get("role")
+        h_content = (h.get("content") or "").strip()
+        if h_role not in ("user", "assistant") or not h_content:
+            continue
+        if len(h_content) > 800:
+            h_content = h_content[:800]
+        messages.append({"role": h_role, "content": h_content})
+
+    messages.append({
+        "role": "user",
+        "content": (
             f"当前物流数据快照：\n{json.dumps(context, ensure_ascii=False)}\n\n"
-            f"用户问题：{question}"},
-    ]
+            f"用户问题：{question}"
+        ),
+    })
 
     try:
         r = _http.post(
             endpoint,
-            headers={"Authorization": f"Bearer {s['api_key'].strip()}",
-                     "Content-Type": "application/json"},
-            json={"model": s["model"], "messages": messages,
-                  "stream": False, "temperature": 0.3, "max_tokens": 500},
+            headers={
+                "Authorization": f"Bearer {s['api_key'].strip()}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": s["model"],
+                "messages": messages,
+                "stream": False,
+                "max_tokens": 500,
+                "temperature": 0.2,
+                "reasoning_effort": "medium",
+            },
             timeout=(10, 45),
         )
         if r.status_code != 200:
+            logger.warning(f"[assistant] LLM {r.status_code}")
             return jsonify({"error": f"LLM {r.status_code}", "fallback": True}), 200
         data = r.json()
         answer = ((data.get("choices") or [{}])[0]
@@ -2284,7 +2528,177 @@ def assistant_chat():
             return jsonify({"error": "empty answer", "fallback": True}), 200
         return jsonify({"answer": answer})
     except Exception as e:
+        logger.warning(f"[assistant] error: {type(e).__name__}: {e}")
         return jsonify({"error": f"{type(e).__name__}: {e}", "fallback": True}), 200
+    
+@app.route("/api/report/insights", methods=["POST"])
+@login_required
+def report_insights():
+    d = request.get_json() or {}
+    report = d.get("report") or {}
+    if not report or not report.get("metrics"):
+        return jsonify({"error": "no report", "fallback": True}), 200
+
+    conn = get_conn()
+    s = conn.execute("SELECT * FROM builder_settings WHERE user_id=?",
+                     (current_user.id,)).fetchone()
+    conn.close()
+
+    if not s or not (s["api_key"] or "").strip():
+        return jsonify({"error": "no key", "fallback": True}), 200
+
+    metrics = report.get("metrics") or {}
+    carriers = (report.get("carriers") or [])[:5]
+    countries = (report.get("countries") or [])[:5]
+    reasons = (report.get("delay_reasons") or [])[:5]
+    lanes = (report.get("lanes") or [])[:3]
+    cost = report.get("cost_breakdown") or {}
+    ranges = report.get("range_stats") or {}
+
+    context = {
+        "metrics": {k: metrics.get(k) for k in [
+            "total_shipments", "delivered_count", "delayed_count",
+            "in_transit_count", "exception_count", "delay_rate",
+            "on_time_rate", "otif_rate", "eta_accuracy_rate",
+            "avg_delay_days", "p90_delay_days", "at_risk_count",
+            "revenue", "avg_cost_per_shipment",
+        ]},
+        "top_carriers": [
+            {"name": c.get("name"), "delay_rate": c.get("delay_rate"),
+             "otif_rate": c.get("otif_rate"),
+             "shipments": c.get("total_shipments")}
+            for c in carriers
+        ],
+        "top_countries": [
+            {"name": c.get("name"), "delay_rate": c.get("delay_rate"),
+             "shipments": c.get("total_shipments"),
+             "revenue": c.get("revenue")}
+            for c in countries
+        ],
+        "top_reasons": [{"name": r.get("name"), "count": r.get("count")}
+                        for r in reasons],
+        "top_lanes": [{"lane": l.get("lane"),
+                       "delay_rate": l.get("delay_rate"),
+                       "shipments": l.get("total_shipments")}
+                      for l in lanes],
+        "cost": cost,
+        "delay_range": ranges,
+    }
+
+    lang = (d.get("lang") or "zh").lower()
+    is_zh = lang.startswith("zh")
+
+    system_msg = (
+        "你是物流数据分析专家。基于用户提供的结构化数据，输出专业的结论与建议。"
+        if is_zh else
+        "You are a logistics data analyst. Based on the structured data provided, "
+        "output professional conclusions and recommendations."
+    )
+
+    user_msg = f"""{"请用中文回答。" if is_zh else "Please respond in English."}
+
+【数据】
+{json.dumps(context, ensure_ascii=False, indent=2)}
+
+【输出格式 — 严格返回 JSON，不要 markdown 包裹】
+{{
+  "summary": "一段话总结核心发现，必须包含至少 2 个具体数字，≤100 字",
+  "findings": [
+    "关键发现 1：必须引用数据中的具体数字",
+    "关键发现 2：必须引用数据中的具体数字",
+    "关键发现 3：必须引用数据中的具体数字"
+  ],
+  "recommendations": [
+    "建议 1：具体动作 + 预期效果",
+    "建议 2：具体动作 + 预期效果",
+    "建议 3：具体动作 + 预期效果"
+  ]
+}}
+
+【规则】
+1. 只能使用数据中的数字，不能编造
+2. findings 和 recommendations 各 3-5 条
+3. recommendations 要具体可执行（不是"加强管理"这种空话）
+4. 数据中缺失的字段不要提
+5. 只输出 JSON，不要任何解释文字"""
+
+    base_url = (s["base_url"] or "").strip().rstrip("/")
+    if not base_url:
+        return jsonify({"error": "no base_url", "fallback": True}), 200
+    endpoint = (base_url if base_url.endswith("/chat/completions")
+                else base_url + "/chat/completions")
+
+    try:
+        r = _http.post(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {s['api_key'].strip()}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": s["model"],
+                "messages": [
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+                "stream": False,
+                "max_tokens": 1200,
+                "reasoning_effort": "low",
+            },
+            timeout=(10, 45),
+        )
+        if r.status_code != 200:
+            logger.warning(f"[insights] LLM {r.status_code}")
+            return jsonify({"error": f"LLM {r.status_code}", "fallback": True}), 200
+
+        data = r.json()
+        content = ((data.get("choices") or [{}])[0]
+                   .get("message", {}).get("content", "")).strip()
+
+        m = re.search(r"\{[\s\S]*\}", content)
+        if not m:
+            return jsonify({"error": "no json", "fallback": True}), 200
+
+        try:
+            insights = json.loads(m.group(0))
+        except Exception:
+            return jsonify({"error": "invalid json", "fallback": True}), 200
+
+        if not isinstance(insights, dict):
+            return jsonify({"error": "bad shape", "fallback": True}), 200
+
+        summary = insights.get("summary")
+        if not isinstance(summary, str) or not summary.strip():
+            return jsonify({"error": "bad summary", "fallback": True}), 200
+        summary = summary.strip()[:500]
+
+        findings = insights.get("findings") or []
+        recs = insights.get("recommendations") or []
+        if not isinstance(findings, list):
+            findings = []
+        if not isinstance(recs, list):
+            recs = []
+
+        clean_findings = []
+        for x in findings[:5]:
+            if isinstance(x, str) and x.strip():
+                clean_findings.append(x.strip()[:300])
+
+        clean_recs = []
+        for x in recs[:5]:
+            if isinstance(x, str) and x.strip():
+                clean_recs.append(x.strip()[:300])
+
+        logger.info(f"[insights] ok: {len(clean_findings)} findings, {len(clean_recs)} recs")
+        return jsonify({
+            "summary": summary,
+            "findings": clean_findings,
+            "recommendations": clean_recs,
+        })
+
+    except Exception as e:
+        logger.warning(f"[insights] error: {type(e).__name__}: {e}")
+        return jsonify({"error": str(e), "fallback": True}), 200
 
 @app.route("/api/builder/generate", methods=["POST"])
 @login_required
@@ -2529,7 +2943,7 @@ def builder_generate():
             time.sleep(0.003)
 
         yield b"data: [DONE]\n\n"
-        
+
     return Response(
         stream(),
         mimetype="text/event-stream",

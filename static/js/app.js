@@ -1257,7 +1257,40 @@ function switchView(name) {
   if (window.lucide) lucide.createIcons();
   closeUserMenu();
 
-  if (name === "home") loadHistory();
+  if (name === "home") {
+    // ★ 回首页 = 开始新分析 → 清空上一个项目的状态和对话
+    state.currentProjectId = null;
+    state.currentTitle = "";
+    state.lastData = null;
+    state._chatHistory = [];
+    state._lastIntent = null;
+
+    // 清空对话显示并恢复欢迎消息
+    const log = $("chat-log");
+    if (log) {
+      log.innerHTML = "";
+      const div = document.createElement("div");
+      div.className = "chat-msg assistant";
+      div.innerHTML = escapeHtml(t("chat.welcome"))
+        .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+        .replace(/\n/g, "<br>");
+      log.appendChild(div);
+      state._chatHistory.push({ role: "assistant", text: t("chat.welcome") });
+    }
+    renderChatOptions(defaultOptions());
+
+    // 关闭 AI 面板
+    const panel = $("ai-panel");
+    if (panel) panel.classList.add("hidden");
+    const main = $("main-content");
+    if (main) main.classList.remove("with-ai");
+
+    // 清空报告标题（避免留下旧项目标题）
+    if ($("rp-title")) $("rp-title").textContent = "Report";
+    if ($("rp-subtitle")) $("rp-subtitle").textContent = "—";
+
+    loadHistory();
+  }
   if (name === "settings") loadSettings();
   if (name === "admin") loadAdmin();
   if (name === "dashboard") loadDashboard();
@@ -1270,6 +1303,7 @@ function switchView(name) {
     }, 100);
   }
 }
+
 document.querySelectorAll(".nav-item").forEach((item) => {
   item.addEventListener("click", () => switchView(item.dataset.view));
 });
@@ -1368,6 +1402,24 @@ async function generate() {
     const config = await api("/api/analyze", {
       method: "POST", body: JSON.stringify({ prompt })
     });
+
+    if (config && config.unsupported) {
+      toast(
+        config.reason || (state.lang === "zh" ? "无法分析该需求" : "Unsupported request"),
+        "error"
+      );
+      status.classList.add("hidden");
+      return;
+    }
+
+    if (config && config.reasoning) {
+      const reasoningEl = document.querySelector("#gen-status .gen-reasoning");
+      if (reasoningEl) {
+        reasoningEl.textContent = `💡 ${config.reasoning}`;
+        reasoningEl.classList.remove("hidden");
+      }
+    }
+
     steps[0].className = "gen-step done";
     steps[1].className = "gen-step active";
     await new Promise((r) => setTimeout(r, 300));
@@ -1697,6 +1749,8 @@ async function compute() {
     finishLoading();
 
     autoSaveProject();
+
+    fetchLLMInsights(data, seq);
   } catch (e) {
     console.error("[compute] failed:", e);
     if (seq === state.computeSeq) {
@@ -3064,7 +3118,10 @@ function toggleAppendix() {
 // =============================================================
 function renderReport(data) {
   const m = data.metrics;
-  if (!m || !m.total_shipments) { $("report-body").textContent = t("report.empty"); return; }
+  if (!m || !m.total_shipments) {
+    $("report-body").textContent = t("report.empty");
+    return;
+  }
   const carriers = data.carriers || [];
   const countries = data.countries || [];
   const reasons = data.delay_reasons || [];
@@ -3122,6 +3179,10 @@ function renderReport(data) {
     if (L === "zh") lines.push(`**${t("report.atRisk")}**：当前有 ${m.at_risk_count} 个在途订单存在 SLA 违约风险。`);
     else lines.push(`**${t("report.atRisk")}**: ${m.at_risk_count} in-transit shipments at risk of missing their SLA.`);
   }
+
+  // ══════════════════════════════════════════════════════════
+  // Next Steps — 独立区域，LLM 成功时会被替换
+  // ══════════════════════════════════════════════════════════
   const steps = [];
   if (worstCarrier) {
     steps.push(fmt(t("report.step1"), {
@@ -3144,14 +3205,122 @@ function renderReport(data) {
       rate: worstLane.delay_rate,
     }));
   }
-  lines.push(`**${t("report.nextSteps")}**：\n` + steps.map((s, i) => `${i + 1}. ${s}`).join("\n"));
-  lines.push(t("report.disclaimer"));
 
-  const html = escapeHtml(lines.join("\n\n"))
+  // ══════════════════════════════════════════════════════════
+  // 拼装三段式结构：结构化摘要 / Next Steps / Disclaimer
+  // ══════════════════════════════════════════════════════════
+  const summaryHtml = escapeHtml(lines.join("\n\n"))
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-    .replace(/^&gt;\s?(.+)$/gm, "<blockquote>$1</blockquote>")
     .replace(/\n/g, "<br>");
-  $("report-body").innerHTML = html;
+
+  const stepsHtml = escapeHtml(
+    `**${t("report.nextSteps")}**：\n` + steps.map((s, i) => `${i + 1}. ${s}`).join("\n")
+  )
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\n/g, "<br>");
+
+  const disclaimerRaw = t("report.disclaimer").replace(/^>\s?/, "").trim();
+  const disclaimerHtml = `<blockquote style="border-left:2px solid var(--accent);padding-left:12px;color:var(--text-3);font-style:italic;margin:12px 0;font-size:12.5px;">${escapeHtml(disclaimerRaw)}</blockquote>`;
+
+  $("report-body").innerHTML = `
+    <div id="report-structured">${summaryHtml}</div>
+    <div id="report-next-steps" style="margin-top:18px;white-space:normal;">${stepsHtml}</div>
+    ${disclaimerHtml}
+  `;
+}
+
+// =============================================================
+// LLM 结论与建议（异步增强，失败保留本地模板）
+// =============================================================
+async function fetchLLMInsights(data, seq) {
+  const reportBody = $("report-body");
+  if (!reportBody || !data || !data.metrics) return;
+
+  const loadingId = "insights-loading-" + Date.now();
+  const loadingHtml = state.lang === "zh"
+    ? "🤖 AI 正在生成深度分析…"
+    : "🤖 AI is analyzing…";
+  reportBody.insertAdjacentHTML("beforeend",
+    `<div id="${loadingId}" style="margin-top:20px;padding:12px 16px;
+       background:rgba(96,165,250,.06);border-left:3px solid var(--accent);
+       border-radius:6px;color:var(--text-3);font-size:13px;">
+       ${loadingHtml}
+     </div>`);
+
+  try {
+    const res = await api("/api/report/insights", {
+      method: "POST",
+      body: JSON.stringify({
+        report: {
+          metrics: data.metrics,
+          carriers: (data.carriers || []).slice(0, 5),
+          countries: (data.countries || []).slice(0, 5),
+          delay_reasons: (data.delay_reasons || []).slice(0, 5),
+          lanes: (data.lanes || []).slice(0, 3),
+          cost_breakdown: data.cost_breakdown,
+          range_stats: data.range_stats,
+        },
+        lang: state.lang,
+      }),
+    });
+
+    if (seq !== state.computeSeq) {
+      const el = $(loadingId);
+      if (el) el.remove();
+      return;
+    }
+
+    const el = $(loadingId);
+    if (el) el.remove();
+
+    if (!res || res.error || res.fallback || !res.summary) {
+      console.log("[insights] fallback, keeping template");
+      return;
+    }
+
+    renderLLMInsights(res);
+  } catch (e) {
+    const el = $(loadingId);
+    if (el) el.remove();
+    console.warn("[insights] failed:", e);
+  }
+}
+
+function renderLLMInsights(res) {
+  const stepsBox = $("report-next-steps");
+  if (!stepsBox) return;   // 结构不对，跳过（不覆盖结构化摘要）
+
+  const isZh = state.lang === "zh";
+  const summary = (res.summary || "").trim();
+  const findings = (res.findings || []).filter(x => x && String(x).trim());
+  const recs = (res.recommendations || []).filter(x => x && String(x).trim());
+
+  const summaryHtml = summary
+    ? `<div style="margin-bottom:14px;line-height:1.8;">${escapeHtml(summary).replace(/\n/g, "<br>")}</div>`
+    : "";
+
+  const findingsHtml = findings.length ? `
+    <div style="margin-bottom:14px;">
+      <div style="font-weight:600;color:var(--text);margin-bottom:8px;">
+        ${isZh ? "关键发现" : "Key Findings"}
+      </div>
+      <ul style="margin:0;padding-left:22px;line-height:1.9;">
+        ${findings.map(f => `<li>${escapeHtml(f)}</li>`).join("")}
+      </ul>
+    </div>` : "";
+
+  const recsHtml = recs.length ? `
+    <div>
+      <div style="font-weight:600;color:var(--text);margin-bottom:8px;">
+        ${isZh ? "下一步建议" : "Next Steps"}
+      </div>
+      <ol style="margin:0;padding-left:22px;line-height:1.9;">
+        ${recs.map(r => `<li>${escapeHtml(r)}</li>`).join("")}
+      </ol>
+    </div>` : "";
+
+  // ★ 只替换 Next Steps 区，不动 #report-structured
+  stepsBox.innerHTML = summaryHtml + findingsHtml + recsHtml;
 }
 
 // =============================================================
@@ -3171,18 +3340,57 @@ function toggleAIPanel() {
     if (!$("chat-log").innerHTML.trim()) resetChat();
   }
 }
-function resetChat() {
+
+let _chatLoadToken = 0;
+
+async function resetChat() {
   const log = $("chat-log");
   if (!log) return;
   log.innerHTML = "";
   state._chatHistory = [];
   state._lastIntent = null;
-  addChat("assistant", t("chat.welcome"));
+
+  const myToken = ++_chatLoadToken;
+
+  if (state.currentProjectId && !state.readonly) {
+    try {
+      const res = await fetch(`/api/projects/${state.currentProjectId}/chats`);
+      if (myToken !== _chatLoadToken) return;
+      if (res.ok) {
+        const rows = await res.json();
+        if (Array.isArray(rows) && rows.length > 0) {
+          rows.forEach(r => {
+            const role = r.role === "user" ? "user" : "assistant";
+            const div = document.createElement("div");
+            div.className = `chat-msg ${role}`;
+            div.innerHTML = escapeHtml(r.content || "")
+              .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+              .replace(/\n/g, "<br>");
+            log.appendChild(div);
+            state._chatHistory.push({ role, text: r.content || "" });
+          });
+          if (state._chatHistory.length > 6) {
+            state._chatHistory = state._chatHistory.slice(-6);
+          }
+          log.scrollTop = log.scrollHeight;
+          renderChatOptions(defaultOptions());
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn("[chat] load history failed:", e);
+    }
+  }
+
+  if (myToken !== _chatLoadToken) return;
+  addChat("assistant", t("chat.welcome"), { persist: false });
   renderChatOptions(defaultOptions());
 }
-function addChat(role, text) {
+
+function addChat(role, text, options) {
   const log = $("chat-log");
   if (!log) return;
+  const persist = !(options && options.persist === false);
   const div = document.createElement("div");
   div.className = `chat-msg ${role}`;
   div.innerHTML = escapeHtml(text)
@@ -3192,10 +3400,28 @@ function addChat(role, text) {
   log.scrollTop = log.scrollHeight;
   state._chatHistory.push({ role, text });
   if (state._chatHistory.length > 6) state._chatHistory = state._chatHistory.slice(-6);
+
+  if (persist && state.currentProjectId && !state.readonly) {
+    saveChatToProject(role, text);
+  }
 }
+
+function saveChatToProject(role, content) {
+  if (!state.currentProjectId || !content) return;
+  if (role !== "user" && role !== "assistant") return;
+  const c = String(content);
+  if (c.length > 4000) return;
+  fetch(`/api/projects/${state.currentProjectId}/chats`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role, content: c }),
+  }).catch(() => {});
+}
+
 function defaultOptions() {
   return ["delay", "carrier", "country", "otif", "atrisk", "revenue", "cost", "optimize"];
 }
+
 function renderChatOptions(options) {
   const box = $("chat-options");
   if (!box) return;
@@ -3207,6 +3433,7 @@ function renderChatOptions(options) {
     btn.addEventListener("click", () => handleQuestion(btn.dataset.opt, true));
   });
 }
+
 function sendAssistant() {
   const input = $("chat-input");
   if (!input) return;
@@ -3215,43 +3442,53 @@ function sendAssistant() {
   input.value = "";
   handleQuestion(text, false);
 }
+
 function matchIntent(text) {
-  const s = text.toLowerCase();
-  if (/(延误|延迟|delay|late|slip)/.test(s)) return "delay";
+  const s = (text || "").toLowerCase();
+
+  // 具体意图优先
   if (/(承运商|物流商|carrier|shipping company|快递)/.test(s)) return "carrier";
-  if (/(国家|地区|country|destination|map|地图)/.test(s)) return "country";
-  if (/(收入|revenue|金额|money|sales)/.test(s)) return "revenue";
-  if (/(成本|cost)/.test(s)) return "cost";
+  if (/(线路|lane|路线|走廊)/.test(s)) return "lane";
+  if (/(城市|city)/.test(s)) return "city";
+  if (/(哪天|哪一天|每天|每日|趋势|trend|daily)/.test(s)) return "which_day";
+  if (/(原因|reason|为什么.*延误)/.test(s)) return "reason";
+  if (/(国家|country|地区)/.test(s)) return "country";
   if (/(otif|准时且完整|on.time.*in.full)/.test(s)) return "otif";
   if (/(在途|风险|at.risk|at-risk|overdue)/.test(s)) return "atrisk";
+  if (/(收入|revenue|金额|money|sales)/.test(s)) return "revenue";
+  if (/(成本|cost)/.test(s)) return "cost";
   if (/(优化|改善|improve|optimize|suggest|建议|recommend|怎么)/.test(s)) return "optimize";
+  if (/(延误|延迟|delay|late|slip)/.test(s)) return "delay";   // 泛意图放最后
   return null;
 }
-async function handleQuestion(textOrKey, isKey) {
-  if (!state.lastData) { addChat("assistant", t("chat.noData")); return; }
 
-  // 快捷按钮：走本地规则，零延迟
-  if (isKey) {
-    addChat("user", t("qa.opt." + textOrKey));
-    state._lastIntent = textOrKey;
-    answerIntent(textOrKey, state.lastData);
+async function handleQuestion(textOrKey, isKey) {
+  if (!state.lastData) {
+    addChat("assistant", t("chat.noData"));
     return;
   }
 
-  // 自由文本：调 LLM
-  addChat("user", textOrKey);
+  const displayText = isKey ? t("qa.opt." + textOrKey) : textOrKey;
+
+  // ★ 先拍历史快照（不含本条），传给 LLM 实现多轮对话
+  const historySnapshot = state._chatHistory
+    .filter(m => m.role === "user" || m.role === "assistant")
+    .slice(-6)
+    .map(m => ({ role: m.role, content: m.text }));
+
+  addChat("user", displayText);
 
   const loadingEl = document.createElement("div");
   loadingEl.className = "chat-msg assistant";
-  loadingEl.innerHTML = '<span style="opacity:0.6;">思考中…</span>';
+  loadingEl.innerHTML = `<span style="opacity:0.6;">${state.lang === "zh" ? "思考中…" : "Thinking…"}</span>`;
   $("chat-log").appendChild(loadingEl);
   $("chat-log").scrollTop = $("chat-log").scrollHeight;
 
-  const fallback = () => {
-    const intent = matchIntent(textOrKey) || state._lastIntent;
+  const fallback = (intentKey) => {
+    const intent = intentKey || matchIntent(displayText) || state._lastIntent;
     if (intent) {
       state._lastIntent = intent;
-      answerIntent(intent, state.lastData);
+      answerIntent(intent, state.lastData, displayText);   // ← 新增第三个参数
     } else {
       addChat("assistant", t("chat.fallback"));
       renderChatOptions(defaultOptions());
@@ -3263,7 +3500,9 @@ async function handleQuestion(textOrKey, isKey) {
     const res = await api("/api/assistant", {
       method: "POST",
       body: JSON.stringify({
-        question: textOrKey,
+        question: displayText,
+        history: historySnapshot,
+        project_id: state.currentProjectId || null,
         report: {
           metrics: d.metrics,
           carriers: d.carriers || [],
@@ -3274,55 +3513,165 @@ async function handleQuestion(textOrKey, isKey) {
           cost_breakdown: d.cost_breakdown,
           range_stats: d.range_stats,
           map_cities: d.map_cities || [],
+          filters: state.filters,
         },
       }),
     });
 
     loadingEl.remove();
 
-    if (res.answer) {
+    if (res && res.answer) {
       addChat("assistant", res.answer);
       renderChatOptions(defaultOptions());
     } else {
-      fallback();
+      // LLM 未配置或失败 → 本地规则兜底
+      fallback(isKey ? textOrKey : null);
     }
   } catch (e) {
     loadingEl.remove();
-    fallback();
+    console.warn("[assistant] request failed:", e);
+    fallback(isKey ? textOrKey : null);
   }
 }
 
-function answerIntent(intent, data) {
+function answerIntent(intent, data, question) {
+  const q = (question || "").toLowerCase();
+  const L = state.lang;
   const m = data.metrics;
   const carriers = data.carriers || [];
   const countries = data.countries || [];
   const reasons = data.delay_reasons || [];
+  const lanes = data.lanes || [];
+  const trend = data.trend || [];
+  const mapCities = data.map_cities || [];
   const cb = data.cost_breakdown || {};
+
+  // ── 时间范围检测：用户问的和当前 filter 不一致时明确提示
+  const currentDays = parseInt((state.filters && state.filters.date_range_days) || 30);
+  let timePrefix = "";
+
+  const timeMatch = q.match(/最近\s*(\d+)\s*天|last\s+(\d+)\s*days?/);
+  if (timeMatch) {
+    const requestedDays = parseInt(timeMatch[1] || timeMatch[2]);
+    if (requestedDays && requestedDays !== currentDays) {
+      timePrefix = L === "zh"
+        ? `⚠️ 当前报告基于最近 ${currentDays} 天数据。如需最近 ${requestedDays} 天的分析，请将顶部时间过滤器改为「最近 ${requestedDays} 天」后再问。\n\n（以下是基于当前 ${currentDays} 天的参考）\n\n`
+        : `⚠️ Current report is based on the last ${currentDays} days. To analyze the last ${requestedDays} days, please change the top time filter to "Last ${requestedDays} days" and ask again.\n\n(Below is reference based on current ${currentDays} days)\n\n`;
+    }
+  }
+
   let msg = "";
   const worst = findWorstCarrier(carriers);
   const best = findBestCarrier(carriers);
   const worstCountry = countries[0];
 
-  if (intent === "delay") {
-    msg = fmt(t("qa.delay"), {
-      delay_rate: m.delay_rate ?? 0, delayed: m.delayed_count ?? 0,
-      total: m.total_shipments ?? 0, avg: m.avg_delay_days ?? 0,
-      p90: m.p90_delay_days ?? 0,
-      reason: reasons[0] ? tv("reason", reasons[0].name) : "—",
-    });
+  if (intent === "country") {
+    // 识别"X 个国家/国"
+    const nMatch = q.match(/(\d+)\s*个?\s*(国家|国)/);
+    const topN = nMatch ? Math.min(Math.max(parseInt(nMatch[1]), 1), 5) : 1;
+
+    if (topN > 1 && countries.length >= topN) {
+      const top = countries.slice(0, topN);
+      if (L === "zh") {
+        msg = `${topN} 个延误率最高的国家：\n` +
+          top.map((c, i) =>
+            `${i + 1}. **${tv("country", c.name)}**（延误率 ${c.delay_rate ?? "—"}%，${(c.total_shipments || 0).toLocaleString()} 单）`
+          ).join("\n");
+      } else {
+        msg = `Top ${topN} countries by delay rate:\n` +
+          top.map((c, i) =>
+            `${i + 1}. **${tv("country", c.name)}** (${c.delay_rate ?? "—"}% delay, ${(c.total_shipments || 0).toLocaleString()} shipments)`
+          ).join("\n");
+      }
+    } else {
+      msg = fmt(t("qa.country"), {
+        name: worstCountry ? tv("country", worstCountry.name) : "—",
+        rate: worstCountry?.delay_rate ?? 0,
+        count: worstCountry?.total_shipments ?? 0,
+      });
+    }
   } else if (intent === "carrier") {
-    msg = fmt(t("qa.carrier"), {
-      worst: worst ? tv("carrier", worst.name) : "—",
-      worstRate: worst?.delay_rate ?? 0,
-      best: best ? tv("carrier", best.name) : "—",
-      bestRate: best?.delay_rate ?? 0,
-    });
-  } else if (intent === "country") {
-    msg = fmt(t("qa.country"), {
-      name: worstCountry ? tv("country", worstCountry.name) : "—",
-      rate: worstCountry?.delay_rate ?? 0,
-      count: worstCountry?.total_shipments ?? 0,
-    });
+    const nMatch = q.match(/(\d+)\s*个?\s*承运商|top\s+(\d+)\s+carrier/);
+    const topN = nMatch
+      ? Math.min(Math.max(parseInt(nMatch[1] || nMatch[2]), 1), 5)
+      : 1;
+
+    const valid = carriers.filter(c => c.delay_rate != null && (c.total_shipments || 0) >= 10)
+      .sort((a, b) => (b.delay_rate || 0) - (a.delay_rate || 0));
+
+    if (topN > 1 && valid.length >= topN) {
+      const top = valid.slice(0, topN);
+      if (L === "zh") {
+        msg = `${topN} 个延误率最高的承运商：\n` +
+          top.map((c, i) =>
+            `${i + 1}. **${tv("carrier", c.name)}**（延误率 ${c.delay_rate}%，OTIF ${c.otif_rate ?? "—"}%，${(c.total_shipments || 0).toLocaleString()} 单）`
+          ).join("\n");
+      } else {
+        msg = `Top ${topN} carriers by delay rate:\n` +
+          top.map((c, i) =>
+            `${i + 1}. **${tv("carrier", c.name)}** (${c.delay_rate}% delay, OTIF ${c.otif_rate ?? "—"}%, ${(c.total_shipments || 0).toLocaleString()} shipments)`
+          ).join("\n");
+      }
+    } else {
+      msg = fmt(t("qa.carrier"), {
+        worst: worst ? tv("carrier", worst.name) : "—",
+        worstRate: worst?.delay_rate ?? 0,
+        best: best ? tv("carrier", best.name) : "—",
+        bestRate: best?.delay_rate ?? 0,
+      });
+    }
+  } else if (intent === "lane") {
+    const valid = lanes.filter(l => l.delay_rate != null && (l.total_shipments || 0) >= 10);
+    if (valid.length) {
+      const worstLane = valid.reduce((a, b) => (a.delay_rate > b.delay_rate ? a : b));
+      msg = L === "zh"
+        ? `延误率最高的线路：**${translateLane(worstLane.lane)}**（延误率 ${worstLane.delay_rate}%，${(worstLane.total_shipments || 0).toLocaleString()} 单）。`
+        : `Worst lane: **${worstLane.lane}** (${worstLane.delay_rate}% delay, ${(worstLane.total_shipments || 0).toLocaleString()} shipments).`;
+    } else {
+      msg = L === "zh" ? "当前数据无线路统计。" : "No lane data available.";
+    }
+  } else if (intent === "city") {
+    let topCity = null;
+    let topCountryName = null;
+    for (const c of countries.slice(0, 5)) {
+      const cname = c.name;
+      if (!cname) continue;
+      const cities = mapCities.filter(x => x.country === cname && x.delay_rate != null);
+      if (cities.length) {
+        cities.sort((a, b) => (b.delay_rate || 0) - (a.delay_rate || 0));
+        if (!topCity || (cities[0].delay_rate || 0) > (topCity.delay_rate || 0)) {
+          topCity = cities[0];
+          topCountryName = cname;
+        }
+      }
+    }
+    if (topCity) {
+      msg = L === "zh"
+        ? `延误率最高的城市：**${tv("city", topCity.name)}**（${tv("country", topCountryName)}，延误率 ${topCity.delay_rate}%，${(topCity.total_shipments || 0).toLocaleString()} 单）。`
+        : `Worst city: **${topCity.name}** (${topCountryName}, ${topCity.delay_rate}% delay, ${(topCity.total_shipments || 0).toLocaleString()} shipments).`;
+    } else {
+      msg = L === "zh" ? "当前数据无城市明细。" : "No city data available.";
+    }
+  } else if (intent === "which_day") {
+    const valid = trend.filter(d => (d.total || 0) >= 5 && d.delay_rate != null);
+    if (valid.length) {
+      const worstDay = valid.reduce((a, b) => (a.delay_rate > b.delay_rate ? a : b));
+      msg = L === "zh"
+        ? `延误率最高的日期：**${worstDay.date}**（延误率 ${worstDay.delay_rate}%，当日 ${worstDay.total} 单）。`
+        : `Worst day: **${worstDay.date}** (${worstDay.delay_rate}% delay, ${worstDay.total} shipments).`;
+    } else {
+      msg = L === "zh" ? "当前数据无每日趋势。" : "No daily trend available.";
+    }
+  } else if (intent === "reason") {
+    if (reasons.length) {
+      const r1 = reasons[0];
+      const r2 = reasons[1];
+      msg = L === "zh"
+        ? `主要延误原因：**${tv("reason", r1.name)}**（${r1.count.toLocaleString()} 单）${r2 ? `，其次 ${tv("reason", r2.name)}（${r2.count.toLocaleString()} 单）` : ""}。`
+        : `Top reason: **${tv("reason", r1.name)}** (${r1.count.toLocaleString()} cases)${r2 ? `, followed by ${tv("reason", r2.name)} (${r2.count.toLocaleString()})` : ""}.`;
+    } else {
+      msg = L === "zh" ? "当前数据无延误原因统计。" : "No delay reason data.";
+    }
   } else if (intent === "revenue") {
     msg = fmt(t("qa.revenue"), {
       revenue: (m.revenue || 0).toLocaleString(),
@@ -3337,7 +3686,8 @@ function answerIntent(intent, data) {
     });
   } else if (intent === "otif") {
     msg = fmt(t("qa.otif"), {
-      rate: m.otif_rate ?? 0, count: m.otif_count ?? 0,
+      rate: m.otif_rate ?? 0,
+      count: m.otif_count ?? 0,
       delivered: m.delivered_count ?? 0,
     });
   } else if (intent === "atrisk") {
@@ -3350,8 +3700,18 @@ function answerIntent(intent, data) {
       worstCountryRate: worstCountry?.delay_rate ?? 0,
       topReason: reasons[0] ? tv("reason", reasons[0].name) : "—",
     });
+  } else {
+    msg = fmt(t("qa.delay"), {
+      delay_rate: m.delay_rate ?? 0,
+      delayed: m.delayed_count ?? 0,
+      total: m.total_shipments ?? 0,
+      avg: m.avg_delay_days ?? 0,
+      p90: m.p90_delay_days ?? 0,
+      reason: reasons[0] ? tv("reason", reasons[0].name) : "—",
+    });
   }
-  addChat("assistant", msg || t("chat.fallback"));
+
+  addChat("assistant", timePrefix + msg);
   renderChatOptions(defaultOptions());
 }
 
