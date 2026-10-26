@@ -1667,12 +1667,26 @@ BUILDER_SYSTEM_PROMPT = """你是前端工程师。根据用户需求生成完�
 2. 输出必须是完整可运行的 HTML（含 <!DOCTYPE html>、<html>、<head>、<body>）
 3. CSS/JS 全部内联，不引用外部 JS（除非 CDN 加载 Chart.js/ECharts）
 4. 界面语言跟随用户需求
-5. 所有 onclick/onkeydown 引用的函数必须先用 function 声明
+5. 所有 onclick/onkeydown 引用的函数必须先用 function 声明（function xxx() {} 而不是 const xxx = () => {}）
+6. 功能必须真实可交互，不能有占位符、TODO、注释代替实现
+7. 应用要能独立运行，不依赖父页面
 
 【数据持久化 — 极其重要】
-6. 用户数据必须用 localStorage 保存
-7. localStorage 必须用 try/catch 包住
-8. 初始化先 load，操作后立刻 save
+8. 所有用户数据（列表、分数、设置、进度）必须用 localStorage 保存
+9. localStorage 必须用 try/catch 包住（沙箱可能拒绝）
+10. 初始化必须先 loadData() 从 localStorage 读，操作后立刻 saveData()
+11. 不能只放内存，否则刷新就丢
+
+标准模式：
+```javascript
+function loadData() {
+  try { return JSON.parse(localStorage.getItem('myapp-key')) || []; }
+  catch (e) { return []; }
+}
+function saveData(v) {
+  try { localStorage.setItem('myapp-key', JSON.stringify(v)); }
+  catch (e) {}
+}
 
 【⚠️ 修改模式 — 如果你是回应修改请求】
 【当前代码是基准，你的任务是修改它，不是重新生成】
@@ -1765,8 +1779,8 @@ def builder_list_versions(pid):
         conn.close()
         return jsonify({"error": "not found"}), 404
     rows = conn.execute(
-        "SELECT id, instruction, summary, code, created_at FROM builder_versions "
-        "WHERE project_id=? ORDER BY created_at DESC", (pid,)).fetchall()
+        "SELECT id, instruction, summary, created_at FROM builder_versions "
+        "WHERE project_id=? ORDER BY created_at DESC, rowid DESC", (pid,)).fetchall()
     conn.close()
     return jsonify([dict(r) for r in rows])
 
@@ -2254,17 +2268,25 @@ def builder_generate():
 
     from builder_templates import match_template, validate_modification
 
-
     def sse(obj):
         return b"data: " + json.dumps(obj, ensure_ascii=False).encode("utf-8") + b"\n\n"
 
     # ══════════════════════════════════════════════════════════
-    # 场景 A：首次生成
+    # 修改请求：必须走 LLM，不允许模板假装修改
     # ══════════════════════════════════════════════════════════
-    if not current_code:
+    if current_code and not has_key:
+        return jsonify({
+            "error": "当前未配置模型 API Key，无法执行代码修改。"
+                     "请在右上角『设置』中配置模型后再试。"
+        }), 400
+
+    # ══════════════════════════════════════════════════════════
+    # 首次生成 + 无 Key：只能走模板兜底
+    # ══════════════════════════════════════════════════════════
+    if not has_key:
         tpl_code, tpl_name = match_template(instruction)
         if tpl_code:
-            logger.info(f"[generate] first-gen template: {tpl_name}")
+            logger.info(f"[generate] no key, template fallback: {tpl_name}")
 
             def tpl_stream():
                 payload = {"choices": [{"delta": {
@@ -2278,30 +2300,22 @@ def builder_generate():
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                          "Connection": "close"},
             )
-        if not has_key:
-            return jsonify({
-                "error": "未匹配到模板且未配置 API Key。可试：2048 / 待办 / 计算器 / 番茄钟 / 记账本 / 贪吃蛇 / 天气 / 物流面板"
-            }), 400
-        # 未匹配模板但配置了 Key → 走 LLM 生成
-        # 落到下面统一 LLM 分支
-
-    # ══════════════════════════════════════════════════════════
-    # 场景 B：修改请求必须走 LLM
-    # ══════════════════════════════════════════════════════════
-    if current_code and not has_key:
         return jsonify({
-            "error": "当前未配置模型 API Key，无法执行代码修改。"
-                     "请在右上角『设置』中配置模型后再试。"
+            "error": "未配置 API Key，无法生成自定义应用。"
+                     "可试内置模板：2048 / 待办 / 计算器 / 番茄钟 / 记账本 / 贪吃蛇 / 天气 / 物流面板"
         }), 400
 
-    base_url = (s["base_url"] or "").strip().rstrip("/") if s else ""
+    # ══════════════════════════════════════════════════════════
+    # 有 Key：首次生成和修改都走 LLM
+    # ══════════════════════════════════════════════════════════
+    base_url = (s["base_url"] or "").strip().rstrip("/")
     if not base_url:
         return jsonify({"error": "Base URL 未配置"}), 400
     endpoint = (base_url if base_url.endswith("/chat/completions")
                 else base_url + "/chat/completions")
 
-    api_key = (s["api_key"] or "").strip() if s else ""
-    model = (s["model"] or "").strip() if s else ""
+    api_key = (s["api_key"] or "").strip()
+    model = (s["model"] or "").strip()
     if not api_key or not model:
         return jsonify({"error": "API Key 或模型未配置"}), 400
 
@@ -2313,48 +2327,45 @@ def builder_generate():
                         + current_code[-half:])
 
     def build_messages(attempt=1, prev_errors=None):
-        """attempt: 1=首次, 2=重试, 3=分解式重试"""
         msgs = [{"role": "system", "content": BUILDER_SYSTEM_PROMPT}]
 
         if current_code:
+            # 修改模式
             err_hint = ""
             if prev_errors:
                 err_hint = (
                     f"⚠️ 上一次修改失败，原因：\n"
                     + "\n".join(f"- {e}" for e in prev_errors)
-                    + "\n\n这次必须真正修改到位，不能重蹈覆辙。\n\n"
+                    + "\n\n这次必须真正修改到位。\n\n"
                 )
-
-            if attempt >= 3:
-                # 分解式：先规划再输出
-                content = (
-                    f"{err_hint}"
-                    f"当前代码：\n```html\n{current_code}\n```\n\n"
-                    f"用户要求：{instruction}\n\n"
-                    f"【三步走】\n"
-                    f"第一步：在心里列出需要改的地方（不要输出）\n"
-                    f"  - 用户要求的功能改在哪里？\n"
-                    f"  - 原有功能是否保留？\n"
-                    f"第二步：输出完整的新 HTML 代码\n"
-                    f"第三步：自检（不要输出自检结果，只输出代码）\n\n"
-                    f"只输出一个 ```html 代码块。"
-                )
-            else:
-                content = (
-                    f"{err_hint}"
-                    f"当前代码（基准）：\n```html\n{current_code}\n```\n\n"
-                    f"用户要求修改：{instruction}\n\n"
-                    f"【必须遵守】\n"
-                    f"1. 输出完整的新版本 HTML（从 <!DOCTYPE html> 到 </html>）\n"
-                    f"2. 必须基于当前代码修改，不是重新生成\n"
-                    f"3. 用户要求的功能必须真实实现（不是注释、不是占位符）\n"
-                    f"4. 原有功能完整保留（方向键、计分、最高分、新游戏、持久化等）\n"
-                    f"5. 代码必须有明显变化（用户能看出来）\n"
-                    f"6. 只输出 ```html 代码块，不要任何解释文字"
-                )
+            content = (
+                f"{err_hint}"
+                f"当前代码（基准）：\n```html\n{current_code}\n```\n\n"
+                f"用户要求修改：{instruction}\n\n"
+                f"【必须遵守】\n"
+                f"1. 输出完整的新版本 HTML（从 <!DOCTYPE html> 到 </html>）\n"
+                f"2. 必须基于当前代码修改，不是重新生成\n"
+                f"3. 用户要求的功能必须真实实现\n"
+                f"4. 原有功能完整保留\n"
+                f"5. 代码必须有明显变化\n"
+                f"6. 只输出 ```html 代码块"
+            )
             msgs.append({"role": "user", "content": content})
         else:
-            msgs.append({"role": "user", "content": instruction})
+            # 首次生成模式
+            content = (
+                f"用户需求：{instruction}\n\n"
+                f"请按以下要求生成完整应用：\n"
+                f"1. 输出完整可运行的 HTML（含 <!DOCTYPE html>、<html>、<head>、<body>）\n"
+                f"2. CSS/JS 全部内联，不依赖外部资源（除非 CDN 加载 Chart.js）\n"
+                f"3. 界面语言跟随用户需求\n"
+                f"4. 所有用户数据必须用 localStorage 持久化（用 try/catch 包住）\n"
+                f"5. 初始化先 load，操作后立刻 save\n"
+                f"6. 所有 onclick 引用的函数必须先用 function 声明\n"
+                f"7. 功能真实可交互，不要占位符\n"
+                f"8. 只输出一个 ```html 代码块，不要任何解释文字"
+            )
+            msgs.append({"role": "user", "content": content})
         return msgs
 
     def call_llm(msgs, max_tokens=12000):
@@ -2369,17 +2380,14 @@ def builder_generate():
                 "messages": msgs,
                 "stream": False,
                 "max_tokens": max_tokens,
-                # ✅ OpenAI 兼容端点用 reasoning_effort
-                # ❌ 不要用 thinking_level（那是 Gemini 原生 API 的参数）
                 "reasoning_effort": "medium",
             },
             timeout=(15, 180),
         )
         if r.status_code != 200:
-            raise RuntimeError(f"LLM HTTP {r.status_code}: {r.text[:500]}")
+            raise RuntimeError(f"LLM HTTP {r.status_code}: {r.text[:300]}")
         data = r.json()
-        content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
-        return content or ""
+        return (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
 
     def extract_html(raw):
         if not raw:
@@ -2396,8 +2404,8 @@ def builder_generate():
     def stream():
         final_html = None
         last_errors = None
+        used_fallback = False
 
-        # 三次尝试
         for attempt in range(1, 4):
             yield sse({"stage": "attempt", "attempt": attempt})
             try:
@@ -2411,14 +2419,14 @@ def builder_generate():
                 continue
 
             html = extract_html(raw)
-            if not html:
-                last_errors = ["LLM 未返回有效的 HTML 代码块"]
+            if not html or "<html" not in html.lower():
+                last_errors = ["模型未返回有效的 HTML 代码块"]
                 if attempt == 3:
                     break
-                yield sse({"stage": "retry", "reason": "未返回 HTML"})
+                yield sse({"stage": "retry", "reason": "未返回完整 HTML"})
                 continue
 
-            # 首次生成：直接通过
+            # 首次生成：通过
             if not current_code:
                 final_html = html
                 break
@@ -2434,21 +2442,43 @@ def builder_generate():
             last_errors = errors
             yield sse({"stage": "retry", "reason": "；".join(errors)})
 
-        # 三次都失败 → 明确报错，让用户重试
+        # ══════════════════════════════════════════════════════
+        # LLM 三次都失败 → 首次生成场景可以尝试模板兜底
+        # ══════════════════════════════════════════════════════
         if not final_html:
-            err_detail = "；".join(last_errors) if last_errors else "未知原因"
-            logger.error(f"[generate] all 3 attempts failed: {err_detail}")
-            yield sse({"error": (
-                f"无法完成此修改（原因：{err_detail}）。\n"
-                "建议：\n"
-                "1. 换个说法重试一次\n"
-                "2. 或点击『新建应用』重新生成\n"
-                "3. 或在设置中切换到 gemini-3.5-flash（能力更强）"
-            )})
-            yield b"data: [DONE]\n\n"
-            return
-        
+            if not current_code:
+                # 首次生成：尝试模板兜底
+                tpl_code, tpl_name = match_template(instruction)
+                if tpl_code:
+                    logger.warning(f"[generate] LLM failed, fallback to template: {tpl_name}")
+                    yield sse({"stage": "fallback",
+                               "reason": f"AI 生成失败，已使用内置 {tpl_name} 模板"})
+                    final_html = tpl_code
+                    used_fallback = True
+                else:
+                    yield sse({"error": (
+                        f"AI 生成失败（原因：{'；'.join(last_errors or ['未知'])}）。\n"
+                        "建议：\n"
+                        "1. 换个说法重试\n"
+                        "2. 或在设置中切换到 gemini-3.5-flash（能力更强）"
+                    )})
+                    yield b"data: [DONE]\n\n"
+                    return
+            else:
+                # 修改场景：不给模板兜底（模板不是修改的结果）
+                yield sse({"error": (
+                    f"无法完成此修改（原因：{'；'.join(last_errors or ['未知'])}）。\n"
+                    "建议：\n"
+                    "1. 换个说法重试一次\n"
+                    "2. 或点击『新建应用』重新生成\n"
+                    "3. 或在设置中切换到 gemini-3.5-flash（能力更强）"
+                )})
+                yield b"data: [DONE]\n\n"
+                return
+
+        # ══════════════════════════════════════════════════════
         # 模拟流式输出
+        # ══════════════════════════════════════════════════════
         wrapped = "```html\n" + final_html + "\n```"
         chunk_size = 200
         for i in range(0, len(wrapped), chunk_size):

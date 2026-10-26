@@ -629,17 +629,16 @@
   function restoreChatHistory() {
     const log = $("chat-log");
     if (!log || !versions.length) return;
-
+    // 按时间升序，最早的在前（聊天习惯）
     const sorted = [...versions].sort((a, b) => {
       const ta = new Date(a.created_at).getTime() || 0;
       const tb = new Date(b.created_at).getTime() || 0;
       return ta - tb;
     });
-
     log.innerHTML = "";
     sorted.forEach((v, i) => {
       const isLatest = i === sorted.length - 1;
-      const versionNo = sorted.length - i;
+      const versionNo = i + 1;   // ← 关键修复：最早 i=0 → v1，最新 i=length-1 → vN
 
       const userMsg = document.createElement("div");
       userMsg.className = "chat-msg user";
@@ -653,7 +652,6 @@
         : `v${versionNo}`;
       log.appendChild(aiMsg);
     });
-
     requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; });
   }
 
